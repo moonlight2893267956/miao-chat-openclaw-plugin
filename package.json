@@ -1,0 +1,20 @@
+{
+  "name": "openclaw-miao-gateway",
+  "version": "0.1.0",
+  "description": "Miao Chat gateway plugin for OpenClaw",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "src",
+    "openclaw.plugin.json",
+    "README.md",
+    "config.example.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

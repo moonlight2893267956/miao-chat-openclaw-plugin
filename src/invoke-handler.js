@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import http from "node:http";
+import https from "node:https";
 
 function shortId(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}${Date.now().toString(16).slice(-6)}`;
@@ -143,6 +145,114 @@ function normalizeUsage(usage) {
   };
 }
 
+function normalizeAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) {
+    return [];
+  }
+  const result = [];
+  for (const item of rawAttachments) {
+    const fileId = String(item?.file_id ?? item?.fileId ?? "").trim();
+    if (!fileId) {
+      continue;
+    }
+    result.push({
+      file_id: fileId,
+      name: String(item?.name ?? "").trim(),
+      mime: String(item?.mime ?? "").trim(),
+      size: Number(item?.size ?? 0) || 0,
+      signed_url: String(item?.signed_url ?? item?.signedUrl ?? "").trim(),
+    });
+  }
+  return result;
+}
+
+function isInlineReadableAttachment(item) {
+  const mime = String(item?.mime ?? "").toLowerCase();
+  return mime === "text/plain" || mime === "text/markdown" || mime === "text/x-markdown";
+}
+
+function downloadText(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!url) {
+      resolve("");
+      return;
+    }
+    const target = new URL(url);
+    const client = target.protocol === "https:" ? https : http;
+    const request = client.get(target, { timeout: timeoutMs }, (response) => {
+      if (response.statusCode && response.statusCode >= 400) {
+        reject(new Error(`download failed: http ${response.statusCode}`));
+        response.resume();
+        return;
+      }
+      const chunks = [];
+      response.on("data", (chunk) => {
+        chunks.push(chunk);
+      });
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve(text);
+      });
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error("download timeout"));
+    });
+    request.on("error", reject);
+  });
+}
+
+async function buildOpenclawMessage(prompt, attachments, timeoutMs) {
+  if (!attachments || attachments.length === 0) {
+    return prompt;
+  }
+  const attachmentPreviews = [];
+  for (const item of attachments) {
+    if (!isInlineReadableAttachment(item) || !item.signed_url) {
+      continue;
+    }
+    try {
+      const text = await downloadText(item.signed_url, Math.min(15000, timeoutMs));
+      const preview = text.trim().slice(0, 12000);
+      if (preview) {
+        attachmentPreviews.push({
+          file_id: item.file_id,
+          name: item.name,
+          content_preview: preview,
+        });
+      }
+    } catch {
+      // keep invoke resilient even when attachment preview fetch fails
+    }
+  }
+  const context = {
+    attachments: attachments.map((item) => ({
+      file_id: item.file_id,
+      name: item.name,
+      mime: item.mime,
+      size: item.size,
+      signed_url: item.signed_url,
+    })),
+    attachment_previews: attachmentPreviews,
+  };
+  return `${prompt}\n\n[INPUT_ATTACHMENTS]\n${JSON.stringify(context, null, 2)}`;
+}
+
+function buildEffectivePrompt(prompt, attachments) {
+  const trimmedPrompt = String(prompt ?? "").trim();
+  if (trimmedPrompt) {
+    return trimmedPrompt;
+  }
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    const names = attachments
+      .map((item) => String(item?.name ?? "").trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    const summary = names.length > 0 ? `，附件包括：${names.join("、")}` : "";
+    return `用户发送了 ${attachments.length} 个附件${summary}。请优先读取附件内容后再回答；如果附件暂时不可访问，请明确说明原因。`;
+  }
+  return "";
+}
+
 function buildSocketAuth(config) {
   // runtime gateway auth defaults to token mode; keep empty when caller did not configure it.
   const token = String(process.env.OPENCLAW_API_TOKEN || "").trim();
@@ -161,12 +271,14 @@ function emitInvokeLog(logger, level, eventName, fields = {}) {
   }));
 }
 
-async function streamOpenclaw(config, requestId, prompt, timeoutMs, onDelta) {
+async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs, onDelta) {
   const GatewayClient = await loadGatewayClientClass(config);
   const sessionKey = config.openclawSessionKey || `agent:main:${config.channelId || "miao-chat"}`;
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
   const socketAuth = buildSocketAuth(config);
+
+  const openclawMessage = await buildOpenclawMessage(prompt, attachments, timeoutMs);
 
   return await new Promise((resolve, reject) => {
     let settled = false;
@@ -211,7 +323,7 @@ async function streamOpenclaw(config, requestId, prompt, timeoutMs, onDelta) {
         try {
           await client.request("chat.send", {
             sessionKey,
-            message: prompt,
+            message: openclawMessage,
             timeoutMs,
             idempotencyKey: runId,
           });
@@ -282,6 +394,8 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const turnId = String(payload.turn_id ?? "").trim();
   const assistantMessageId = String(payload.assistant_message_id ?? "").trim();
   const prompt = String(payload?.prompt?.content ?? "");
+  const attachments = normalizeAttachments(payload?.attachments);
+  const effectivePrompt = buildEffectivePrompt(prompt, attachments);
   const timeoutMs = Number(payload.timeout_ms ?? 120000);
   const effectiveTimeoutMs = Number.isFinite(timeoutMs)
     ? Math.max(5000, Math.min(timeoutMs, 240000))
@@ -301,7 +415,7 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
     });
     return;
   }
-  if (!prompt.trim()) {
+  if (!effectivePrompt) {
     emitInvokeLog(logger, "warn", "invoke_invalid_request", {
       ...baseFields,
       reason: "empty_prompt",
@@ -353,13 +467,14 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
   emitInvokeLog(logger, "info", "invoke_start", {
     ...baseFields,
     timeout_ms: effectiveTimeoutMs,
+    attachment_count: attachments.length,
     active_invokes: activeInvokeCount,
     max_concurrent_invokes: maxConcurrent,
   });
 
   try {
     let seq = 0;
-    const usage = await streamOpenclaw(config, requestId, prompt, effectiveTimeoutMs, (chunk) => {
+    const usage = await streamOpenclaw(config, requestId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
       seq += 1;
       wsSend({
         protocol_version: "channel.v0",

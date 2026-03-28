@@ -8,6 +8,9 @@ const plugin = {
   kind: "tools",
   register(api) {
     const config = resolvePluginConfig(api.pluginConfig ?? {});
+    for (const warning of config.configWarnings ?? []) {
+      api.logger.warn(`miao-gateway: config warning: ${warning}`);
+    }
     if (!config.enabled) {
       api.logger.info("miao-gateway: disabled by config");
       api.registerService({ id: "openclaw-miao-gateway", start: () => {}, stop: () => {} });

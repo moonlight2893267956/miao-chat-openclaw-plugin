@@ -8,14 +8,54 @@ function shortId(prefix = "m") {
 }
 
 let gatewayClientClassPromise = null;
+let activeInvokeCount = 0;
+const activeInvokeIds = new Set();
 
 function resolveOpenclawInstallRoot(config) {
-  const cliCandidate = String(config.openclawCliPath || "openclaw").trim();
+  const cliCandidate = String(process.env.OPENCLAW_CLI_PATH || "openclaw").trim();
   const cliPath = fs.existsSync(cliCandidate)
     ? cliCandidate
     : execFileSync("which", [cliCandidate], { encoding: "utf8" }).trim();
   const real = fs.realpathSync(cliPath);
-  return path.dirname(real);
+  const dir = path.dirname(real);
+
+  // npm global symlink usually resolves to .../openclaw/openclaw.mjs
+  if (fs.existsSync(path.join(dir, "dist"))) {
+    return dir;
+  }
+
+  // fallback for layouts resolving to .../openclaw/bin/openclaw
+  const parent = path.dirname(dir);
+  if (fs.existsSync(path.join(parent, "dist"))) {
+    return parent;
+  }
+
+  throw new Error(`cannot resolve openclaw install root from ${real}`);
+}
+
+function hasGatewayClientShape(value) {
+  return (
+    typeof value === "function" &&
+    value.name === "GatewayClient" &&
+    typeof value.prototype?.start === "function" &&
+    typeof value.prototype?.request === "function"
+  );
+}
+
+function listGatewayClientBundles(distDir) {
+  const files = fs.readdirSync(distDir);
+  const patterns = [
+    /^method-scopes-.*\.js$/,
+    /^reply-.*\.js$/,
+    /^pi-embedded-.*\.js$/,
+    /^gateway-runtime-.*\.js$/,
+  ];
+  const selected = [];
+  for (const pattern of patterns) {
+    const matches = files.filter((name) => pattern.test(name)).sort().reverse();
+    selected.push(...matches);
+  }
+  return [...new Set(selected)].map((name) => path.join(distDir, name));
 }
 
 async function loadGatewayClientClass(config) {
@@ -25,23 +65,41 @@ async function loadGatewayClientClass(config) {
   gatewayClientClassPromise = (async () => {
     const root = resolveOpenclawInstallRoot(config);
     const distDir = path.join(root, "dist");
-    const replyBundle = fs
-      .readdirSync(distDir)
-      .filter((name) => /^reply-.*\.js$/.test(name))
-      .sort()
-      .at(-1);
-    if (!replyBundle) {
-      throw new Error("openclaw reply bundle not found");
+    if (!fs.existsSync(distDir)) {
+      throw new Error(`openclaw dist directory not found: ${distDir}`);
     }
-    const mod = await import(pathToFileURL(path.join(distDir, replyBundle)).href);
-    const GatewayClient = Object.values(mod).find(
-      (value) => typeof value === "function" && value.name === "GatewayClient"
-    );
-    if (!GatewayClient) {
-      throw new Error("GatewayClient export not found");
+
+    const bundles = listGatewayClientBundles(distDir);
+    if (bundles.length === 0) {
+      throw new Error(`no candidate bundles for GatewayClient under ${distDir}`);
     }
-    return GatewayClient;
-  })();
+
+    const importErrors = [];
+    for (const file of bundles) {
+      try {
+        const mod = await import(pathToFileURL(file).href);
+        const GatewayClient = Object.values(mod).find(hasGatewayClientShape);
+        if (GatewayClient) {
+          return GatewayClient;
+        }
+      } catch (error) {
+        importErrors.push(`${path.basename(file)}: ${String(error?.message ?? error)}`);
+      }
+    }
+
+    const detail = [
+      `searched bundles=${bundles.map((f) => path.basename(f)).join(",")}`,
+      importErrors.length > 0 ? `import_errors=${importErrors.slice(0, 3).join(" | ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ; ");
+    throw new Error(`GatewayClient export not found (${detail})`);
+  })().catch((error) => {
+    // allow retries after failed lazy load
+    gatewayClientClassPromise = null;
+    throw error;
+  });
+
   return gatewayClientClassPromise;
 }
 
@@ -85,11 +143,30 @@ function normalizeUsage(usage) {
   };
 }
 
+function buildSocketAuth(config) {
+  // runtime gateway auth defaults to token mode; keep empty when caller did not configure it.
+  const token = String(process.env.OPENCLAW_API_TOKEN || "").trim();
+  if (token) {
+    return { token };
+  }
+  return {};
+}
+
+function emitInvokeLog(logger, level, eventName, fields = {}) {
+  const safeLevel = typeof logger?.[level] === "function" ? level : "info";
+  logger[safeLevel](JSON.stringify({
+    component: "miao-gateway-invoke",
+    event: eventName,
+    ...fields,
+  }));
+}
+
 async function streamOpenclaw(config, requestId, prompt, timeoutMs, onDelta) {
   const GatewayClient = await loadGatewayClientClass(config);
   const sessionKey = config.openclawSessionKey || `agent:main:${config.channelId || "miao-chat"}`;
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
+  const socketAuth = buildSocketAuth(config);
 
   return await new Promise((resolve, reject) => {
     let settled = false;
@@ -119,7 +196,7 @@ async function streamOpenclaw(config, requestId, prompt, timeoutMs, onDelta) {
 
     const client = new GatewayClient({
       url: config.openclawGatewayUrl,
-      token: config.openclawApiToken || undefined,
+      ...socketAuth,
       clientName: "gateway-client",
       clientDisplayName: `miao-gateway-${config.channelId || "plugin"}`,
       clientVersion: config.pluginVersion || "0.1.0",
@@ -209,14 +286,26 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const effectiveTimeoutMs = Number.isFinite(timeoutMs)
     ? Math.max(5000, Math.min(timeoutMs, 240000))
     : 120000;
-  const logPrefix = `miao-gateway: channel_id=${config.channelId} request_id=${requestId || "-"} turn_id=${turnId || "-"}`;
+  const baseFields = {
+    channel_id: config.channelId || "",
+    request_id: requestId || "",
+    turn_id: turnId || "",
+    assistant_message_id: assistantMessageId || "",
+    trace_id: traceId || "",
+  };
 
   if (!requestId) {
-    logger.warn(`${logPrefix} invoke.start missing request_id`);
+    emitInvokeLog(logger, "warn", "invoke_invalid_request", {
+      ...baseFields,
+      reason: "missing_request_id",
+    });
     return;
   }
   if (!prompt.trim()) {
-    logger.warn(`${logPrefix} invoke.start empty prompt`);
+    emitInvokeLog(logger, "warn", "invoke_invalid_request", {
+      ...baseFields,
+      reason: "empty_prompt",
+    });
     wsSend({
       protocol_version: "channel.v0",
       msg_id: shortId(),
@@ -233,8 +322,40 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
     });
     return;
   }
-
-  logger.info(`${logPrefix} invoke.start timeout_ms=${effectiveTimeoutMs}`);
+  const maxConcurrent = Number.isFinite(config.maxConcurrentInvokes)
+    ? Math.max(1, config.maxConcurrentInvokes)
+    : 1;
+  if (activeInvokeCount >= maxConcurrent) {
+    emitInvokeLog(logger, "warn", "invoke_rejected_busy", {
+      ...baseFields,
+      active_invokes: activeInvokeCount,
+      max_concurrent_invokes: maxConcurrent,
+    });
+    wsSend({
+      protocol_version: "channel.v0",
+      msg_id: shortId(),
+      event: "invoke.error",
+      ts: new Date().toISOString(),
+      trace_id: traceId,
+      payload: {
+        request_id: requestId,
+        turn_id: turnId,
+        assistant_message_id: assistantMessageId,
+        code: "CHANNEL_BUSY",
+        message: "plugin is busy, retry later",
+      },
+    });
+    return;
+  }
+  const startedAtMs = Date.now();
+  activeInvokeIds.add(requestId);
+  activeInvokeCount = activeInvokeIds.size;
+  emitInvokeLog(logger, "info", "invoke_start", {
+    ...baseFields,
+    timeout_ms: effectiveTimeoutMs,
+    active_invokes: activeInvokeCount,
+    max_concurrent_invokes: maxConcurrent,
+  });
 
   try {
     let seq = 0;
@@ -272,14 +393,25 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
         usage,
       },
     });
-    logger.info(`${logPrefix} invoke.done chunks=${seq}`);
+    emitInvokeLog(logger, "info", "invoke_done", {
+      ...baseFields,
+      chunks: seq,
+      duration_ms: Date.now() - startedAtMs,
+      active_invokes: activeInvokeCount,
+    });
   } catch (error) {
     const message = String(error?.message ?? "invoke failed");
     const lowerMessage = message.toLowerCase();
     const errorCode = lowerMessage.includes("timeout")
       ? "CHANNEL_OPENCLAW_TIMEOUT"
       : "CHANNEL_OPENCLAW_ERROR";
-    logger.error(`${logPrefix} invoke.error code=${errorCode} message=${message}`);
+    emitInvokeLog(logger, "error", "invoke_error", {
+      ...baseFields,
+      code: errorCode,
+      message,
+      duration_ms: Date.now() - startedAtMs,
+      active_invokes: activeInvokeCount,
+    });
     wsSend({
       protocol_version: "channel.v0",
       msg_id: shortId(),
@@ -294,5 +426,8 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
         message,
       },
     });
+  } finally {
+    activeInvokeIds.delete(requestId);
+    activeInvokeCount = activeInvokeIds.size;
   }
 }

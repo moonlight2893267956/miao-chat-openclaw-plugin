@@ -14,6 +14,15 @@ async function getWebSocketCtor() {
 
 export function createGatewayClient({ api, config }) {
   const logger = api.logger;
+  const emitLog = (level, eventName, fields = {}) => {
+    const safeLevel = typeof logger?.[level] === "function" ? level : "info";
+    logger[safeLevel](JSON.stringify({
+      component: "miao-gateway-client",
+      event: eventName,
+      channel_id: config.channelId || "",
+      ...fields,
+    }));
+  };
   const registerTimeoutMs = Math.max(5000, Math.max(1, config.heartbeatIntervalSec) * 2000);
   let ws = null;
   let heartbeatTimer = null;
@@ -94,7 +103,7 @@ export function createGatewayClient({ api, config }) {
 
   const forceReconnect = (reason) => {
     lastError = reason || lastError || "force reconnect";
-    logger.warn(`miao-gateway: channel_id=${config.channelId} force reconnect reason=${lastError}`);
+    emitLog("warn", "force_reconnect", { reason: lastError });
     resetSocketState();
     hardCloseSocket();
     scheduleReconnect();
@@ -176,9 +185,10 @@ export function createGatewayClient({ api, config }) {
       return;
     }
     const waitSec = Math.min(reconnectDelaySec, Math.max(1, config.reconnectMaxSec));
-    logger.warn(
-      `miao-gateway: channel_id=${config.channelId} reconnecting in ${waitSec}s last_error=${lastError || "-"}`
-    );
+    emitLog("warn", "reconnect_scheduled", {
+      wait_sec: waitSec,
+      last_error: lastError || "",
+    });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
@@ -204,6 +214,7 @@ export function createGatewayClient({ api, config }) {
     try {
       event = JSON.parse(dataText);
     } catch {
+      emitLog("warn", "invalid_event_json");
       return;
     }
 
@@ -220,26 +231,33 @@ export function createGatewayClient({ api, config }) {
         clearReconnectTimer();
         lastRegisteredAt = new Date().toISOString();
         lastHeartbeatAckAt = Date.now();
-        logger.info(
-          `miao-gateway: channel_id=${config.channelId} registered session_id=${sessionId} heartbeat_sec=${config.heartbeatIntervalSec}`
-        );
+        emitLog("info", "register_ok", {
+          session_id: sessionId,
+          heartbeat_sec: config.heartbeatIntervalSec,
+        });
         startHeartbeat();
         break;
       }
       case "register.error": {
         lastError = String(event?.payload?.message ?? "register failed");
-        logger.error(`miao-gateway: channel_id=${config.channelId} register failed: ${lastError}`);
+        emitLog("error", "register_error", {
+          reason: lastError,
+        });
         ws?.close();
         break;
       }
       case "heartbeat.ack": {
         lastHeartbeatAckAt = Date.now();
-        logger.debug?.(`miao-gateway: heartbeat ack seq=${event?.payload?.seq ?? ""}`);
+        emitLog("debug", "heartbeat_ack", {
+          seq: event?.payload?.seq ?? "",
+        });
         break;
       }
       case "channel.kick": {
         lastError = `kicked:${event?.payload?.reason ?? ""}`;
-        logger.warn(`miao-gateway: channel_id=${config.channelId} kicked by server reason=${event?.payload?.reason ?? ""}`);
+        emitLog("warn", "channel_kick", {
+          reason: String(event?.payload?.reason ?? ""),
+        });
         ws?.close();
         break;
       }
@@ -263,7 +281,7 @@ export function createGatewayClient({ api, config }) {
       stopWatchdog();
       connectStartedAt = Date.now();
       const WebSocketCtor = await getWebSocketCtor();
-      logger.info(`miao-gateway: connecting ${config.wsUrl}`);
+      emitLog("info", "connect_start", { ws_url: config.wsUrl });
       ws = new WebSocketCtor(config.wsUrl);
       startWatchdog();
 
@@ -277,15 +295,18 @@ export function createGatewayClient({ api, config }) {
 
       ws.onerror = (event) => {
         lastError = String(event?.message ?? "socket error");
-        logger.warn(`miao-gateway: channel_id=${config.channelId} socket error ${event?.message ?? ""}`);
+        emitLog("warn", "socket_error", {
+          reason: String(event?.message ?? ""),
+        });
       };
 
       ws.onclose = () => {
         stopWatchdog();
         resetSocketState();
-        logger.info(
-          `miao-gateway: channel_id=${config.channelId} socket closed last_registered_at=${lastRegisteredAt || "-"} last_heartbeat_at=${lastHeartbeatAt || "-"}`
-        );
+        emitLog("info", "socket_closed", {
+          last_registered_at: lastRegisteredAt || "",
+          last_heartbeat_at: lastHeartbeatAt || "",
+        });
         if (!stopped) {
           scheduleReconnect();
         }
@@ -293,7 +314,9 @@ export function createGatewayClient({ api, config }) {
     } catch (error) {
       connecting = false;
       lastError = String(error?.message ?? error);
-      logger.error(`miao-gateway: channel_id=${config.channelId} connect failed: ${lastError}`);
+      emitLog("error", "connect_failed", {
+        reason: lastError,
+      });
       scheduleReconnect();
     }
   };

@@ -26,7 +26,7 @@ bash scripts/install_local_plugin.sh
 
 1. 复制插件目录到 `~/.openclaw/extensions/openclaw-miao-gateway`
 2. 在 `~/.openclaw/openclaw.json` 中写入 `plugins.installs/entries/allow`
-3. 给 `entries.openclaw-miao-gateway.config` 写入默认配置（可自行修改）
+3. 以交互方式写入 `entries.openclaw-miao-gateway.config`（可跳过可选项）
 
 ## 配置说明
 
@@ -35,8 +35,15 @@ bash scripts/install_local_plugin.sh
 - `plugins.entries.openclaw-miao-gateway.enabled`: 是否启用插件
 - `plugins.entries.openclaw-miao-gateway.config.wsUrl`: 后端网关地址
 - `plugins.entries.openclaw-miao-gateway.config.channelId`: 本机插件唯一标识（建议固定）
-- `plugins.entries.openclaw-miao-gateway.config.registerToken`: 后端注册 token（如启用鉴权）
-- `plugins.entries.openclaw-miao-gateway.config.openclawApiToken`: 本机 OpenClaw token
+- `plugins.entries.openclaw-miao-gateway.config.registerToken`: 后端注册 token（如启用鉴权，可省略）
+- `plugins.entries.openclaw-miao-gateway.config.deviceId`: 设备标识（可省略，默认主机名）
+- `plugins.entries.openclaw-miao-gateway.config.heartbeatIntervalSec`: 心跳间隔（可省略，默认 20）
+- `plugins.entries.openclaw-miao-gateway.config.reconnectMaxSec`: 重连上限（可省略，默认 8）
+- `plugins.entries.openclaw-miao-gateway.config.maxConcurrentInvokes`: 插件并发上限（可省略，默认 1）
+- `plugins.entries.openclaw-miao-gateway.config.openclawGatewayUrl`: 本地 OpenClaw 网关地址（可省略，默认 `ws://127.0.0.1:18789`）
+- `plugins.entries.openclaw-miao-gateway.config.openclawSessionKey`: 本地会话 key（可省略）
+
+最小必填配置只有两项：`wsUrl` + `channelId`。其它字段都可以省略并使用插件默认值。
 
 示例见 `config.example.json`。
 

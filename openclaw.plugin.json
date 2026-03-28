@@ -15,15 +15,12 @@
       "registerToken": { "type": "string", "description": "Optional register token for gateway auth" },
       "heartbeatIntervalSec": { "type": "number", "description": "Heartbeat interval (seconds). Default: 20" },
       "reconnectMaxSec": { "type": "number", "description": "Reconnect backoff max (seconds). Default: 8" },
+      "maxConcurrentInvokes": { "type": "number", "description": "Max invoke.start handled concurrently. Default: 1" },
       "openclawGatewayUrl": { "type": "string", "description": "Local OpenClaw gateway URL, default ws://127.0.0.1:18789" },
-      "openclawSessionKey": { "type": "string", "description": "Session key for chat.send, e.g. agent:main:miao-chat" },
-      "openclawApiToken": { "type": "string", "description": "Optional local OpenClaw gateway token" },
-      "openclawCliPath": { "type": "string", "description": "Path to openclaw binary" },
-      "openclawNodeBinDir": { "type": "string", "description": "Node bin dir to prepend to PATH" }
+      "openclawSessionKey": { "type": "string", "description": "Session key for chat.send, e.g. agent:main:miao-chat" }
     }
   },
   "uiHints": {
-    "registerToken": { "label": "Register Token", "sensitive": true },
-    "openclawApiToken": { "label": "OpenClaw API Token", "sensitive": true }
+    "registerToken": { "label": "Register Token", "sensitive": true }
   }
 }

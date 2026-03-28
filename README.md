@@ -40,10 +40,16 @@ bash scripts/install_local_plugin.sh
 - `plugins.entries.openclaw-miao-gateway.config.heartbeatIntervalSec`: 心跳间隔（可省略，默认 20）
 - `plugins.entries.openclaw-miao-gateway.config.reconnectMaxSec`: 重连上限（可省略，默认 8）
 - `plugins.entries.openclaw-miao-gateway.config.maxConcurrentInvokes`: 插件并发上限（可省略，默认 1）
+- `plugins.entries.openclaw-miao-gateway.config.queueWaitTimeoutMs`: 请求在队列中最长等待时间（可省略，默认 60000ms）
 - `plugins.entries.openclaw-miao-gateway.config.openclawGatewayUrl`: 本地 OpenClaw 网关地址（可省略，默认 `ws://127.0.0.1:18789`）
 - `plugins.entries.openclaw-miao-gateway.config.openclawSessionKey`: 本地会话 key（可省略）
 
 最小必填配置只有两项：`wsUrl` + `channelId`。其它字段都可以省略并使用插件默认值。
+
+并发行为说明：
+- 当请求并发超过 `maxConcurrentInvokes` 时，插件会自动进入队列等待，不会立即返回 busy 失败。
+- 队列超过上限（当前 100）时，才会返回 `CHANNEL_QUEUE_FULL`。
+- 若单个请求在队列里等待超过 `queueWaitTimeoutMs`，会返回 `CHANNEL_QUEUE_TIMEOUT`。
 
 示例见 `config.example.json`。
 

@@ -12,6 +12,7 @@ DEFAULT_CHANNEL_ID="ch_miao_mac_01"
 DEFAULT_HEARTBEAT_SEC="20"
 DEFAULT_RECONNECT_MAX_SEC="8"
 DEFAULT_MAX_CONCURRENT_INVOKES="1"
+DEFAULT_QUEUE_WAIT_TIMEOUT_MS="60000"
 DEFAULT_OPENCLAW_GATEWAY_URL="ws://127.0.0.1:18789"
 DEFAULT_OPENCLAW_SESSION_KEY="agent:main:miao-chat"
 
@@ -64,6 +65,7 @@ REGISTER_TOKEN=""
 HEARTBEAT_SEC=""
 RECONNECT_MAX_SEC=""
 MAX_CONCURRENT_INVOKES=""
+QUEUE_WAIT_TIMEOUT_MS=""
 OPENCLAW_GATEWAY_URL=""
 OPENCLAW_SESSION_KEY=""
 
@@ -88,6 +90,7 @@ if [[ -t 0 && -t 1 ]]; then
     HEARTBEAT_SEC="$(prompt_default "heartbeatIntervalSec" "${DEFAULT_HEARTBEAT_SEC}")"
     RECONNECT_MAX_SEC="$(prompt_default "reconnectMaxSec" "${DEFAULT_RECONNECT_MAX_SEC}")"
     MAX_CONCURRENT_INVOKES="$(prompt_default "maxConcurrentInvokes" "${DEFAULT_MAX_CONCURRENT_INVOKES}")"
+    QUEUE_WAIT_TIMEOUT_MS="$(prompt_default "queueWaitTimeoutMs" "${DEFAULT_QUEUE_WAIT_TIMEOUT_MS}")"
     OPENCLAW_GATEWAY_URL="$(prompt_default "openclawGatewayUrl" "${DEFAULT_OPENCLAW_GATEWAY_URL}")"
     OPENCLAW_SESSION_KEY="$(prompt_default "openclawSessionKey" "${DEFAULT_OPENCLAW_SESSION_KEY}")"
   fi
@@ -97,7 +100,7 @@ else
 fi
 
 export WS_URL CHANNEL_ID DEVICE_ID REGISTER_TOKEN
-export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_KEY
+export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES QUEUE_WAIT_TIMEOUT_MS OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_KEY
 
 python - <<'PY'
 import json
@@ -155,6 +158,10 @@ if reconnect_sec is not None:
 max_concurrent = maybe_int("MAX_CONCURRENT_INVOKES")
 if max_concurrent is not None:
     plugin_config["maxConcurrentInvokes"] = max_concurrent
+
+queue_wait_timeout_ms = maybe_int("QUEUE_WAIT_TIMEOUT_MS")
+if queue_wait_timeout_ms is not None:
+    plugin_config["queueWaitTimeoutMs"] = queue_wait_timeout_ms
 
 openclaw_gateway_url = getenv("OPENCLAW_GATEWAY_URL")
 if openclaw_gateway_url:

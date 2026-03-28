@@ -12,6 +12,8 @@ function shortId(prefix = "m") {
 let gatewayClientClassPromise = null;
 let activeInvokeCount = 0;
 const activeInvokeIds = new Set();
+const pendingInvokeQueue = [];
+const MAX_PENDING_QUEUE_SIZE = 100;
 
 function resolveOpenclawInstallRoot(config) {
   const cliCandidate = String(process.env.OPENCLAW_CLI_PATH || "openclaw").trim();
@@ -271,6 +273,31 @@ function emitInvokeLog(logger, level, eventName, fields = {}) {
   }));
 }
 
+function resolveMaxConcurrent(config) {
+  if (!Number.isFinite(config?.maxConcurrentInvokes)) {
+    return 1;
+  }
+  return Math.max(1, Math.round(config.maxConcurrentInvokes));
+}
+
+function resolveQueueWaitTimeoutMs(config) {
+  if (!Number.isFinite(config?.queueWaitTimeoutMs)) {
+    return 60000;
+  }
+  const ms = Math.round(config.queueWaitTimeoutMs);
+  return Math.min(600000, Math.max(1000, ms));
+}
+
+function hasPendingRequest(requestId) {
+  if (!requestId) {
+    return false;
+  }
+  if (activeInvokeIds.has(requestId)) {
+    return true;
+  }
+  return pendingInvokeQueue.some((task) => task.requestId === requestId);
+}
+
 async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs, onDelta) {
   const GatewayClient = await loadGatewayClientClass(config);
   const sessionKey = config.openclawSessionKey || `agent:main:${config.channelId || "miao-chat"}`;
@@ -387,6 +414,132 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
   });
 }
 
+async function runInvokeTask(task) {
+  const {
+    logger,
+    wsSend,
+    config,
+    traceId,
+    requestId,
+    turnId,
+    assistantMessageId,
+    attachments,
+    effectivePrompt,
+    effectiveTimeoutMs,
+    baseFields,
+    queuedAtMs,
+  } = task;
+  const maxConcurrent = resolveMaxConcurrent(config);
+  const startedAtMs = Date.now();
+  if (task.queueTimer) {
+    clearTimeout(task.queueTimer);
+  }
+  activeInvokeIds.add(requestId);
+  activeInvokeCount = activeInvokeIds.size;
+
+  emitInvokeLog(logger, "info", "invoke_start", {
+    ...baseFields,
+    timeout_ms: effectiveTimeoutMs,
+    attachment_count: attachments.length,
+    active_invokes: activeInvokeCount,
+    max_concurrent_invokes: maxConcurrent,
+    queue_wait_ms: Math.max(0, startedAtMs - queuedAtMs),
+    queue_size: pendingInvokeQueue.length,
+  });
+
+  try {
+    let seq = 0;
+    const usage = await streamOpenclaw(config, requestId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
+      seq += 1;
+      wsSend({
+        protocol_version: "channel.v0",
+        msg_id: shortId(),
+        event: "invoke.chunk",
+        ts: new Date().toISOString(),
+        trace_id: traceId,
+        payload: {
+          request_id: requestId,
+          turn_id: turnId,
+          assistant_message_id: assistantMessageId,
+          seq,
+          delta: chunk.text,
+          replace: chunk.replace === true,
+          is_final: false,
+        },
+      });
+    });
+
+    wsSend({
+      protocol_version: "channel.v0",
+      msg_id: shortId(),
+      event: "invoke.done",
+      ts: new Date().toISOString(),
+      trace_id: traceId,
+      payload: {
+        request_id: requestId,
+        turn_id: turnId,
+        assistant_message_id: assistantMessageId,
+        last_seq: seq,
+        usage,
+      },
+    });
+    emitInvokeLog(logger, "info", "invoke_done", {
+      ...baseFields,
+      chunks: seq,
+      duration_ms: Date.now() - startedAtMs,
+      active_invokes: activeInvokeCount,
+      queue_size: pendingInvokeQueue.length,
+    });
+  } catch (error) {
+    const message = String(error?.message ?? "invoke failed");
+    const lowerMessage = message.toLowerCase();
+    const errorCode = lowerMessage.includes("timeout")
+      ? "CHANNEL_OPENCLAW_TIMEOUT"
+      : "CHANNEL_OPENCLAW_ERROR";
+    emitInvokeLog(logger, "error", "invoke_error", {
+      ...baseFields,
+      code: errorCode,
+      message,
+      duration_ms: Date.now() - startedAtMs,
+      active_invokes: activeInvokeCount,
+      queue_size: pendingInvokeQueue.length,
+    });
+    wsSend({
+      protocol_version: "channel.v0",
+      msg_id: shortId(),
+      event: "invoke.error",
+      ts: new Date().toISOString(),
+      trace_id: traceId,
+      payload: {
+        request_id: requestId,
+        turn_id: turnId,
+        assistant_message_id: assistantMessageId,
+        code: errorCode,
+        message,
+      },
+    });
+  } finally {
+    activeInvokeIds.delete(requestId);
+    activeInvokeCount = activeInvokeIds.size;
+    drainInvokeQueue();
+  }
+}
+
+function drainInvokeQueue() {
+  if (pendingInvokeQueue.length === 0) {
+    return;
+  }
+  while (pendingInvokeQueue.length > 0) {
+    const nextTask = pendingInvokeQueue[0];
+    const nextMaxConcurrent = resolveMaxConcurrent(nextTask.config);
+    if (activeInvokeCount >= nextMaxConcurrent) {
+      break;
+    }
+    pendingInvokeQueue.shift();
+    void runInvokeTask(nextTask);
+  }
+}
+
 export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const payload = event.payload ?? {};
   const traceId = event.trace_id || "";
@@ -436,14 +589,21 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
     });
     return;
   }
-  const maxConcurrent = Number.isFinite(config.maxConcurrentInvokes)
-    ? Math.max(1, config.maxConcurrentInvokes)
-    : 1;
-  if (activeInvokeCount >= maxConcurrent) {
-    emitInvokeLog(logger, "warn", "invoke_rejected_busy", {
+  if (hasPendingRequest(requestId)) {
+    emitInvokeLog(logger, "warn", "invoke_duplicate_request", {
       ...baseFields,
+      queue_size: pendingInvokeQueue.length,
       active_invokes: activeInvokeCount,
-      max_concurrent_invokes: maxConcurrent,
+    });
+    return;
+  }
+
+  if (pendingInvokeQueue.length >= MAX_PENDING_QUEUE_SIZE) {
+    emitInvokeLog(logger, "warn", "invoke_rejected_queue_full", {
+      ...baseFields,
+      queue_size: pendingInvokeQueue.length,
+      active_invokes: activeInvokeCount,
+      queue_limit: MAX_PENDING_QUEUE_SIZE,
     });
     wsSend({
       protocol_version: "channel.v0",
@@ -455,76 +615,39 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
         request_id: requestId,
         turn_id: turnId,
         assistant_message_id: assistantMessageId,
-        code: "CHANNEL_BUSY",
-        message: "plugin is busy, retry later",
+        code: "CHANNEL_QUEUE_FULL",
+        message: "plugin queue is full, retry later",
       },
     });
     return;
   }
-  const startedAtMs = Date.now();
-  activeInvokeIds.add(requestId);
-  activeInvokeCount = activeInvokeIds.size;
-  emitInvokeLog(logger, "info", "invoke_start", {
-    ...baseFields,
-    timeout_ms: effectiveTimeoutMs,
-    attachment_count: attachments.length,
-    active_invokes: activeInvokeCount,
-    max_concurrent_invokes: maxConcurrent,
-  });
 
-  try {
-    let seq = 0;
-    const usage = await streamOpenclaw(config, requestId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
-      seq += 1;
-      wsSend({
-        protocol_version: "channel.v0",
-        msg_id: shortId(),
-        event: "invoke.chunk",
-        ts: new Date().toISOString(),
-        trace_id: traceId,
-        payload: {
-          request_id: requestId,
-          turn_id: turnId,
-          assistant_message_id: assistantMessageId,
-          seq,
-          delta: chunk.text,
-          replace: chunk.replace === true,
-          is_final: false,
-        },
-      });
-    });
-
-    wsSend({
-      protocol_version: "channel.v0",
-      msg_id: shortId(),
-      event: "invoke.done",
-      ts: new Date().toISOString(),
-      trace_id: traceId,
-      payload: {
-        request_id: requestId,
-        turn_id: turnId,
-        assistant_message_id: assistantMessageId,
-        last_seq: seq,
-        usage,
-      },
-    });
-    emitInvokeLog(logger, "info", "invoke_done", {
+  const task = {
+    logger,
+    wsSend,
+    config,
+    traceId,
+    requestId,
+    turnId,
+    assistantMessageId,
+    attachments,
+    effectivePrompt,
+    effectiveTimeoutMs,
+    baseFields,
+    queuedAtMs: Date.now(),
+  };
+  pendingInvokeQueue.push(task);
+  const queueWaitTimeoutMs = resolveQueueWaitTimeoutMs(config);
+  task.queueTimer = setTimeout(() => {
+    const idx = pendingInvokeQueue.indexOf(task);
+    if (idx < 0) {
+      return;
+    }
+    pendingInvokeQueue.splice(idx, 1);
+    emitInvokeLog(logger, "warn", "invoke_queue_timeout", {
       ...baseFields,
-      chunks: seq,
-      duration_ms: Date.now() - startedAtMs,
-      active_invokes: activeInvokeCount,
-    });
-  } catch (error) {
-    const message = String(error?.message ?? "invoke failed");
-    const lowerMessage = message.toLowerCase();
-    const errorCode = lowerMessage.includes("timeout")
-      ? "CHANNEL_OPENCLAW_TIMEOUT"
-      : "CHANNEL_OPENCLAW_ERROR";
-    emitInvokeLog(logger, "error", "invoke_error", {
-      ...baseFields,
-      code: errorCode,
-      message,
-      duration_ms: Date.now() - startedAtMs,
+      queue_wait_timeout_ms: queueWaitTimeoutMs,
+      queue_size: pendingInvokeQueue.length,
       active_invokes: activeInvokeCount,
     });
     wsSend({
@@ -537,12 +660,20 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
         request_id: requestId,
         turn_id: turnId,
         assistant_message_id: assistantMessageId,
-        code: errorCode,
-        message,
+        code: "CHANNEL_QUEUE_TIMEOUT",
+        message: `plugin queue wait timeout (${queueWaitTimeoutMs}ms)`,
       },
     });
-  } finally {
-    activeInvokeIds.delete(requestId);
-    activeInvokeCount = activeInvokeIds.size;
-  }
+    drainInvokeQueue();
+  }, queueWaitTimeoutMs);
+
+  emitInvokeLog(logger, "info", "invoke_queued", {
+    ...baseFields,
+    queue_size: pendingInvokeQueue.length,
+    active_invokes: activeInvokeCount,
+    max_concurrent_invokes: resolveMaxConcurrent(config),
+    queue_wait_timeout_ms: queueWaitTimeoutMs,
+    timeout_ms: effectiveTimeoutMs,
+  });
+  drainInvokeQueue();
 }

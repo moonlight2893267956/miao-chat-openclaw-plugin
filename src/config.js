@@ -45,6 +45,7 @@ export function resolvePluginConfig(raw) {
   const heartbeatIntervalSec = clampInt(parseNumber(raw.heartbeatIntervalSec ?? 20, 20), 5, 60);
   const reconnectMaxSec = clampInt(parseNumber(raw.reconnectMaxSec ?? 8, 8), 1, 120);
   const maxConcurrentInvokes = clampInt(parseNumber(raw.maxConcurrentInvokes ?? 1, 1), 1, 8);
+  const queueWaitTimeoutMs = clampInt(parseNumber(raw.queueWaitTimeoutMs ?? 60000, 60000), 1000, 600000);
   if (!isValidWsUrl(wsUrl)) {
     warnings.push("wsUrl is invalid; expected ws:// or wss://");
   }
@@ -64,6 +65,7 @@ export function resolvePluginConfig(raw) {
     heartbeatIntervalSec,
     reconnectMaxSec,
     maxConcurrentInvokes,
+    queueWaitTimeoutMs,
     openclawGatewayUrl,
     openclawSessionKey: String(raw.openclawSessionKey ?? "").trim(),
     configWarnings: warnings,

@@ -14,7 +14,7 @@ DEFAULT_RECONNECT_MAX_SEC="8"
 DEFAULT_MAX_CONCURRENT_INVOKES="1"
 DEFAULT_QUEUE_WAIT_TIMEOUT_MS="60000"
 DEFAULT_OPENCLAW_GATEWAY_URL="ws://127.0.0.1:18789"
-DEFAULT_OPENCLAW_SESSION_KEY="agent:main:miao-chat"
+DEFAULT_OPENCLAW_SESSION_KEY="agent:main:main"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "[ERROR] not found: ${CONFIG_PATH}"
@@ -67,7 +67,7 @@ RECONNECT_MAX_SEC=""
 MAX_CONCURRENT_INVOKES=""
 QUEUE_WAIT_TIMEOUT_MS=""
 OPENCLAW_GATEWAY_URL=""
-OPENCLAW_SESSION_KEY=""
+OPENCLAW_SESSION_KEY="${DEFAULT_OPENCLAW_SESSION_KEY}"
 
 if [[ -t 0 && -t 1 ]]; then
   echo "[INFO] 进入交互式配置（仅 wsUrl/channelId 必填，其它可省略）"
@@ -97,6 +97,7 @@ if [[ -t 0 && -t 1 ]]; then
 else
   WS_URL="${WS_URL:-$DEFAULT_WS_URL}"
   CHANNEL_ID="${CHANNEL_ID:-$DEFAULT_CHANNEL_ID}"
+  OPENCLAW_SESSION_KEY="${OPENCLAW_SESSION_KEY:-$DEFAULT_OPENCLAW_SESSION_KEY}"
 fi
 
 export WS_URL CHANNEL_ID DEVICE_ID REGISTER_TOKEN
@@ -167,7 +168,7 @@ openclaw_gateway_url = getenv("OPENCLAW_GATEWAY_URL")
 if openclaw_gateway_url:
     plugin_config["openclawGatewayUrl"] = openclaw_gateway_url
 
-openclaw_session_key = getenv("OPENCLAW_SESSION_KEY")
+openclaw_session_key = getenv("OPENCLAW_SESSION_KEY", "agent:main:main")
 if openclaw_session_key:
     plugin_config["openclawSessionKey"] = openclaw_session_key
 

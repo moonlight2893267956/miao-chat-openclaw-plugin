@@ -1,4 +1,5 @@
 import { handleInvokeStart } from "./invoke-handler.js";
+import { handleCommandStart } from "./command-handler.js";
 
 function shortId(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}${Date.now().toString(16).slice(-6)}`;
@@ -263,6 +264,10 @@ export function createGatewayClient({ api, config }) {
       }
       case "invoke.start": {
         await handleInvokeStart({ logger, wsSend, config, event });
+        break;
+      }
+      case "command.start": {
+        await handleCommandStart({ logger, wsSend, config, event });
         break;
       }
       default:

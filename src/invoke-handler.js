@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 import http from "node:http";
 import https from "node:https";
 
+const LOCAL_ATTACHMENT_DIR = "/tmp/openclaw/input";
+
 function shortId(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}${Date.now().toString(16).slice(-6)}`;
 }
@@ -62,7 +64,7 @@ function listGatewayClientBundles(distDir) {
   return [...new Set(selected)].map((name) => path.join(distDir, name));
 }
 
-async function loadGatewayClientClass(config) {
+export async function loadGatewayClientClass(config) {
   if (gatewayClientClassPromise) {
     return gatewayClientClassPromise;
   }
@@ -107,7 +109,7 @@ async function loadGatewayClientClass(config) {
   return gatewayClientClassPromise;
 }
 
-function extractMessageText(message) {
+export function extractMessageText(message) {
   if (!message) {
     return "";
   }
@@ -168,15 +170,74 @@ function normalizeAttachments(rawAttachments) {
   return result;
 }
 
+function summarizeSignedUrl(urlValue) {
+  const raw = String(urlValue ?? "").trim();
+  if (!raw) {
+    return { present: false, error: "blank" };
+  }
+  try {
+    const parsed = new URL(raw);
+    const keys = [];
+    parsed.searchParams.forEach((_, key) => {
+      if (!keys.includes(key)) {
+        keys.push(key);
+      }
+    });
+    return {
+      present: true,
+      host: parsed.host || "",
+      path: parsed.pathname || "",
+      has_q_sign: keys.some((key) => key.toLowerCase().startsWith("q-sign-")),
+      query_keys: keys.slice(0, 8),
+    };
+  } catch (error) {
+    return {
+      present: true,
+      error: String(error?.message ?? error),
+    };
+  }
+}
+
 function isInlineReadableAttachment(item) {
   const mime = String(item?.mime ?? "").toLowerCase();
   return mime === "text/plain" || mime === "text/markdown" || mime === "text/x-markdown";
 }
 
-function downloadText(url, timeoutMs) {
+function isImageAttachment(item) {
+  const mime = String(item?.mime ?? "").toLowerCase();
+  return mime.startsWith("image/");
+}
+
+function ensureLocalAttachmentDir() {
+  fs.mkdirSync(LOCAL_ATTACHMENT_DIR, { recursive: true });
+}
+
+function sanitizeAttachmentFilename(name, fallbackBase = "attachment") {
+  const raw = String(name ?? "").trim();
+  const baseName = raw ? path.basename(raw) : fallbackBase;
+  const sanitized = baseName
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return sanitized || fallbackBase;
+}
+
+function buildLocalAttachmentPath(item) {
+  const safeName = sanitizeAttachmentFilename(item?.name, `${item?.file_id || "attachment"}`);
+  const prefix = String(item?.file_id || shortId("att")).replace(/[^a-zA-Z0-9_-]/g, "");
+  ensureLocalAttachmentDir();
+  return path.join(LOCAL_ATTACHMENT_DIR, `${prefix}_${safeName}`);
+}
+
+function writeLocalAttachmentFile(targetPath, buffer) {
+  fs.writeFileSync(targetPath, buffer);
+  return targetPath;
+}
+
+function downloadBuffer(url, timeoutMs) {
   return new Promise((resolve, reject) => {
     if (!url) {
-      resolve("");
+      resolve({ buffer: Buffer.alloc(0), contentType: "" });
       return;
     }
     const target = new URL(url);
@@ -192,8 +253,10 @@ function downloadText(url, timeoutMs) {
         chunks.push(chunk);
       });
       response.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        resolve(text);
+        resolve({
+          buffer: Buffer.concat(chunks),
+          contentType: String(response.headers["content-type"] ?? "").trim(),
+        });
       });
     });
     request.on("timeout", () => {
@@ -203,27 +266,147 @@ function downloadText(url, timeoutMs) {
   });
 }
 
-async function buildOpenclawMessage(prompt, attachments, timeoutMs) {
+async function downloadText(url, timeoutMs) {
+  const { buffer } = await downloadBuffer(url, timeoutMs);
+  return buffer.toString("utf8");
+}
+
+function normalizeImageMime(preferredMime, responseMime) {
+  const responseValue = String(responseMime ?? "").split(";")[0].trim().toLowerCase();
+  if (responseValue.startsWith("image/")) {
+    return responseValue;
+  }
+  const preferredValue = String(preferredMime ?? "").split(";")[0].trim().toLowerCase();
+  if (preferredValue.startsWith("image/")) {
+    return preferredValue;
+  }
+  return "";
+}
+
+async function buildOpenclawPayload(prompt, attachments, timeoutMs) {
   if (!attachments || attachments.length === 0) {
-    return prompt;
+    return {
+      message: prompt,
+      chatAttachments: [],
+    };
   }
   const attachmentPreviews = [];
+  const chatAttachments = [];
+  const attachmentWarnings = [];
+  const localAttachments = [];
   for (const item of attachments) {
-    if (!isInlineReadableAttachment(item) || !item.signed_url) {
+    if (!item?.signed_url) {
+      continue;
+    }
+    if (isInlineReadableAttachment(item)) {
+      try {
+        const { buffer } = await downloadBuffer(item.signed_url, Math.min(15000, timeoutMs));
+        const text = buffer.toString("utf8");
+        const preview = text.trim().slice(0, 12000);
+        const localPath = writeLocalAttachmentFile(buildLocalAttachmentPath(item), buffer);
+        if (preview) {
+          attachmentPreviews.push({
+            file_id: item.file_id,
+            name: item.name,
+            content_preview: preview,
+          });
+        }
+        localAttachments.push({
+          file_id: item.file_id,
+          name: item.name,
+          mime: item.mime,
+          local_path: localPath,
+          source: "downloaded",
+        });
+      } catch {
+        attachmentWarnings.push({
+          file_id: item.file_id,
+          name: item.name,
+          reason: "text_preview_fetch_failed",
+        });
+      }
+      continue;
+    }
+    if (!isImageAttachment(item)) {
+      try {
+        const { buffer } = await downloadBuffer(item.signed_url, Math.min(20000, timeoutMs));
+        if (!buffer || buffer.length === 0) {
+          attachmentWarnings.push({
+            file_id: item.file_id,
+            name: item.name,
+            reason: "file_empty",
+          });
+          continue;
+        }
+        const localPath = writeLocalAttachmentFile(buildLocalAttachmentPath(item), buffer);
+        localAttachments.push({
+          file_id: item.file_id,
+          name: item.name,
+          mime: item.mime,
+          local_path: localPath,
+          source: "downloaded",
+          size: buffer.length,
+        });
+      } catch {
+        attachmentWarnings.push({
+          file_id: item.file_id,
+          name: item.name,
+          reason: "file_download_failed",
+        });
+      }
       continue;
     }
     try {
-      const text = await downloadText(item.signed_url, Math.min(15000, timeoutMs));
-      const preview = text.trim().slice(0, 12000);
-      if (preview) {
-        attachmentPreviews.push({
+      const { buffer, contentType } = await downloadBuffer(item.signed_url, Math.min(20000, timeoutMs));
+      if (!buffer || buffer.length === 0) {
+        attachmentWarnings.push({
           file_id: item.file_id,
           name: item.name,
-          content_preview: preview,
+          reason: "image_empty",
         });
+        continue;
       }
+      if (buffer.length > 5_000_000) {
+        attachmentWarnings.push({
+          file_id: item.file_id,
+          name: item.name,
+          reason: "image_too_large",
+          size: buffer.length,
+        });
+        continue;
+      }
+      const mimeType = normalizeImageMime(item.mime, contentType);
+      if (!mimeType) {
+        attachmentWarnings.push({
+          file_id: item.file_id,
+          name: item.name,
+          reason: "image_mime_invalid",
+          mime: item.mime,
+          content_type: contentType,
+        });
+        continue;
+      }
+      chatAttachments.push({
+        type: "image",
+        mimeType,
+        fileName: item.name || `${item.file_id || "image"}.${mimeType.split("/")[1] || "bin"}`,
+        content: buffer.toString("base64"),
+      });
+      const localPath = writeLocalAttachmentFile(buildLocalAttachmentPath(item), buffer);
+      localAttachments.push({
+        file_id: item.file_id,
+        name: item.name,
+        mime: mimeType,
+        local_path: localPath,
+        source: "downloaded",
+        size: buffer.length,
+      });
     } catch {
-      // keep invoke resilient even when attachment preview fetch fails
+      attachmentWarnings.push({
+        file_id: item.file_id,
+        name: item.name,
+        reason: "image_fetch_failed",
+      });
     }
   }
   const context = {
@@ -235,8 +418,13 @@ async function buildOpenclawMessage(prompt, attachments, timeoutMs) {
       signed_url: item.signed_url,
     })),
     attachment_previews: attachmentPreviews,
+    attachment_local_files: localAttachments,
+    attachment_warnings: attachmentWarnings,
   };
-  return `${prompt}\n\n[INPUT_ATTACHMENTS]\n${JSON.stringify(context, null, 2)}`;
+  return {
+    message: `${prompt}\n\n[INPUT_ATTACHMENTS]\n${JSON.stringify(context, null, 2)}`,
+    chatAttachments,
+  };
 }
 
 function buildEffectivePrompt(prompt, attachments) {
@@ -255,7 +443,7 @@ function buildEffectivePrompt(prompt, attachments) {
   return "";
 }
 
-function buildSocketAuth(config) {
+export function buildSocketAuth(config) {
   // runtime gateway auth defaults to token mode; keep empty when caller did not configure it.
   const token = String(process.env.OPENCLAW_API_TOKEN || "").trim();
   if (token) {
@@ -271,6 +459,22 @@ function emitInvokeLog(logger, level, eventName, fields = {}) {
     event: eventName,
     ...fields,
   }));
+}
+
+function logAttachmentUrlSummary(logger, baseFields, attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return;
+  }
+  attachments.forEach((item, index) => {
+    emitInvokeLog(logger, "info", "invoke_attachment_url", {
+      ...baseFields,
+      attachment_index: index,
+      file_id: String(item?.file_id ?? ""),
+      name: String(item?.name ?? ""),
+      mime: String(item?.mime ?? ""),
+      signed_url: summarizeSignedUrl(item?.signed_url),
+    });
+  });
 }
 
 function resolveMaxConcurrent(config) {
@@ -300,12 +504,12 @@ function hasPendingRequest(requestId) {
 
 async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs, onDelta) {
   const GatewayClient = await loadGatewayClientClass(config);
-  const sessionKey = config.openclawSessionKey || `agent:main:${config.channelId || "miao-chat"}`;
+  const sessionKey = String(config.openclawSessionKey ?? "").trim();
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
   const socketAuth = buildSocketAuth(config);
 
-  const openclawMessage = await buildOpenclawMessage(prompt, attachments, timeoutMs);
+  const openclawPayload = await buildOpenclawPayload(prompt, attachments, timeoutMs);
 
   return await new Promise((resolve, reject) => {
     let settled = false;
@@ -313,6 +517,7 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
     let sent = false;
     let usage = { input_tokens: 0, output_tokens: 0 };
     let currentText = "";
+    let acceptedRunId = "";
 
     const settle = (error) => {
       if (settled) {
@@ -349,8 +554,11 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
         sent = true;
         try {
           await client.request("chat.send", {
-            sessionKey,
-            message: openclawMessage,
+            ...(sessionKey ? { sessionKey } : {}),
+            message: openclawPayload.message,
+            ...(openclawPayload.chatAttachments.length > 0
+              ? { attachments: openclawPayload.chatAttachments }
+              : {}),
             timeoutMs,
             idempotencyKey: runId,
           });
@@ -363,12 +571,23 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
           return;
         }
         const payload = evt?.payload ?? {};
-        if (String(payload?.runId ?? "") !== runId) {
+        const payloadRunId = String(payload?.runId ?? "");
+        if (acceptedRunId) {
+          if (payloadRunId && payloadRunId !== acceptedRunId) {
+            return;
+          }
+        } else if (payloadRunId) {
+          acceptedRunId = payloadRunId;
+        } else {
+          acceptedRunId = runId;
+        }
+        if (payloadRunId && payloadRunId !== acceptedRunId) {
           return;
         }
         const state = String(payload?.state ?? "");
         if (state === "delta" || state === "final") {
-          const text = extractMessageText(payload?.message);
+          const text = extractMessageText(payload?.message)
+            || String(payload?.text ?? payload?.content ?? "");
           const patch = computePatch(currentText, text);
           if (patch.text) {
             currentText = text;
@@ -387,7 +606,10 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
           return;
         }
         if (state === "aborted") {
-          settle(new Error("openclaw run aborted"));
+          // Treat remote abort as graceful completion so upstream can render
+          // existing partial text instead of hard-failing the whole turn.
+          usage = normalizeUsage(payload?.usage);
+          settle();
         }
       },
       onConnectError: (error) => {
@@ -446,6 +668,7 @@ async function runInvokeTask(task) {
     queue_wait_ms: Math.max(0, startedAtMs - queuedAtMs),
     queue_size: pendingInvokeQueue.length,
   });
+  logAttachmentUrlSummary(logger, baseFields, attachments);
 
   try {
     let seq = 0;

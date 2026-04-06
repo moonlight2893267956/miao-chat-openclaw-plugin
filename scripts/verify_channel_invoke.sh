@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# M2 验证：连续 10 次 invoke-sync，要求每次都返回有效 content 或明确失败原因。
+# 动态渠道验证：连续 10 次 invoke-sync，要求每次都返回有效 content 或明确失败原因。
 # 用法：
-#   bash scripts/verify_m2_invoke_sync.sh [backend_base] [channel_id]
+#   bash scripts/verify_channel_invoke.sh [backend_base] [channel_id]
 # 例子：
-#   bash scripts/verify_m2_invoke_sync.sh http://81.70.216.46:8081 ch_miao_mac_01
+#   bash scripts/verify_channel_invoke.sh http://81.70.216.46:8081 miao-node-local
 
 BACKEND_BASE="${1:-http://81.70.216.46:8081}"
-CHANNEL_ID="${2:-ch_miao_mac_01}"
+CHANNEL_ID="${2:-miao-node-local}"
 URL="${BACKEND_BASE%/}/api/v1/channel-gateway/invoke-sync"
 
 ok_count=0

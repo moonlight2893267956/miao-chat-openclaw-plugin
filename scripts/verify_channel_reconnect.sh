@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 动态渠道重连验证。
+# 用法：
+#   bash scripts/verify_channel_reconnect.sh [backend_base] [channel_id] [max_recover_sec]
+
 BACKEND_BASE="${1:-http://81.70.216.46:8081}"
-CHANNEL_ID="${2:-ch_miao_mac_01}"
+CHANNEL_ID="${2:-miao-node-local}"
 MAX_RECOVER_SEC="${3:-10}"
 STATUS_URL="${BACKEND_BASE%/}/api/v1/channel-gateway/status"
 

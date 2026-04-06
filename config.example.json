@@ -1,5 +1,5 @@
 {
   "enabled": true,
   "wsUrl": "ws://81.70.216.46:8081/ws/channel-gateway",
-  "channelId": "ch_miao_mac_01"
+  "channelId": "miao-node-local"
 }

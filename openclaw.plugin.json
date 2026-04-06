@@ -10,7 +10,7 @@
     "properties": {
       "enabled": { "type": "boolean", "description": "Enable gateway client service. Default: true" },
       "wsUrl": { "type": "string", "description": "Gateway websocket URL, e.g. ws://81.70.216.46:8081/ws/channel-gateway" },
-      "channelId": { "type": "string", "description": "Unique channel id, e.g. ch_miao_mac_01" },
+      "channelId": { "type": "string", "description": "Unique channel id, e.g. miao-node-mac-mini" },
       "deviceId": { "type": "string", "description": "Device id shown on backend status" },
       "registerToken": { "type": "string", "description": "Optional register token for gateway auth" },
       "heartbeatIntervalSec": { "type": "number", "description": "Heartbeat interval (seconds). Default: 20" },

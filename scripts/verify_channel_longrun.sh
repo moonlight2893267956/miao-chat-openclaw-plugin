@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 动态渠道稳定性巡检。
+# 用法：
+#   bash scripts/verify_channel_longrun.sh [backend_base] [channel_id] [duration_sec] [interval_sec] [timeout_ms] [out_path]
+
 BACKEND_BASE="${1:-http://81.70.216.46:8081}"
-CHANNEL_ID="${2:-ch_miao_mac_01}"
+CHANNEL_ID="${2:-miao-node-local}"
 DURATION_SEC="${3:-1800}"
 INTERVAL_SEC="${4:-30}"
 TIMEOUT_MS="${5:-45000}"
@@ -76,7 +80,7 @@ while [[ "$(date +%s)" -lt "$end_ts" ]]; do
   fi
 
   payload=$(cat <<JSON
-{"channel_id":"${CHANNEL_ID}","prompt":"M3 longrun #${round}: reply short alive line","timeout_ms":${TIMEOUT_MS}}
+{"channel_id":"${CHANNEL_ID}","prompt":"Dynamic channel longrun #${round}: reply short alive line","timeout_ms":${TIMEOUT_MS}}
 JSON
 )
 

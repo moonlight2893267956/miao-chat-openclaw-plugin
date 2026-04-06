@@ -9,13 +9,16 @@ CONFIG_PATH="${OPENCLAW_HOME}/openclaw.json"
 EXT_DIR="${OPENCLAW_HOME}/extensions/${PLUGIN_ID}"
 DEFAULT_WS_URL="ws://81.70.216.46:8081/ws/channel-gateway"
 DEFAULT_CHANNEL_ID="miao-node-local"
+DEFAULT_DISPLAY_NAME="My Mac OpenClaw"
 DEFAULT_HEARTBEAT_SEC="20"
 DEFAULT_RECONNECT_MAX_SEC="8"
 DEFAULT_MAX_CONCURRENT_INVOKES="1"
 DEFAULT_QUEUE_WAIT_TIMEOUT_MS="60000"
 DEFAULT_OPENCLAW_GATEWAY_URL="ws://127.0.0.1:18789"
-DEFAULT_OPENCLAW_SESSION_KEY="agent:local:main"
+DEFAULT_OPENCLAW_SESSION_NAMESPACE="agent:local:main"
 DEFAULT_REGISTER_TOKEN="miao_reg_jnpIHD4gxsphosDUt-Vcoy3P"
+DEFAULT_CAPABILITIES="stream,retry,heartbeat"
+DEFAULT_CHANNEL_TAGS=""
 
 load_existing_config_value() {
   local key="$1"
@@ -86,33 +89,39 @@ cp -R "${PLUGIN_SRC}/"* "${EXT_DIR}/"
 
 EXISTING_WS_URL="$(load_existing_config_value "wsUrl" || true)"
 EXISTING_CHANNEL_ID="$(load_existing_config_value "channelId" || true)"
+EXISTING_DISPLAY_NAME="$(load_existing_config_value "displayName" || true)"
 EXISTING_DEVICE_ID="$(load_existing_config_value "deviceId" || true)"
+EXISTING_CAPABILITIES="$(load_existing_config_value "capabilities" || true)"
+EXISTING_CHANNEL_TAGS="$(load_existing_config_value "channelTags" || true)"
 EXISTING_REGISTER_TOKEN="$(load_existing_config_value "registerToken" || true)"
 EXISTING_HEARTBEAT_SEC="$(load_existing_config_value "heartbeatIntervalSec" || true)"
 EXISTING_RECONNECT_MAX_SEC="$(load_existing_config_value "reconnectMaxSec" || true)"
 EXISTING_MAX_CONCURRENT_INVOKES="$(load_existing_config_value "maxConcurrentInvokes" || true)"
 EXISTING_QUEUE_WAIT_TIMEOUT_MS="$(load_existing_config_value "queueWaitTimeoutMs" || true)"
 EXISTING_OPENCLAW_GATEWAY_URL="$(load_existing_config_value "openclawGatewayUrl" || true)"
-EXISTING_OPENCLAW_SESSION_KEY="$(load_existing_config_value "openclawSessionKey" || true)"
+EXISTING_OPENCLAW_SESSION_NAMESPACE="$(load_existing_config_value "openclawSessionKey" || true)"
 
 WS_URL="${WS_URL:-${EXISTING_WS_URL:-$DEFAULT_WS_URL}}"
 CHANNEL_ID="${CHANNEL_ID:-${EXISTING_CHANNEL_ID:-$DEFAULT_CHANNEL_ID}}"
+DISPLAY_NAME="${DISPLAY_NAME:-${EXISTING_DISPLAY_NAME:-$DEFAULT_DISPLAY_NAME}}"
 DEVICE_ID="${DEVICE_ID:-${EXISTING_DEVICE_ID:-}}"
+CAPABILITIES="${CAPABILITIES:-${EXISTING_CAPABILITIES:-$DEFAULT_CAPABILITIES}}"
+CHANNEL_TAGS="${CHANNEL_TAGS:-${EXISTING_CHANNEL_TAGS:-$DEFAULT_CHANNEL_TAGS}}"
 REGISTER_TOKEN="${REGISTER_TOKEN:-${EXISTING_REGISTER_TOKEN:-$DEFAULT_REGISTER_TOKEN}}"
 HEARTBEAT_SEC="${HEARTBEAT_SEC:-${EXISTING_HEARTBEAT_SEC:-}}"
 RECONNECT_MAX_SEC="${RECONNECT_MAX_SEC:-${EXISTING_RECONNECT_MAX_SEC:-}}"
 MAX_CONCURRENT_INVOKES="${MAX_CONCURRENT_INVOKES:-${EXISTING_MAX_CONCURRENT_INVOKES:-}}"
 QUEUE_WAIT_TIMEOUT_MS="${QUEUE_WAIT_TIMEOUT_MS:-${EXISTING_QUEUE_WAIT_TIMEOUT_MS:-}}"
 OPENCLAW_GATEWAY_URL="${OPENCLAW_GATEWAY_URL:-${EXISTING_OPENCLAW_GATEWAY_URL:-$DEFAULT_OPENCLAW_GATEWAY_URL}}"
-OPENCLAW_SESSION_KEY="${OPENCLAW_SESSION_KEY:-${EXISTING_OPENCLAW_SESSION_KEY:-$DEFAULT_OPENCLAW_SESSION_KEY}}"
+OPENCLAW_SESSION_NAMESPACE="${OPENCLAW_SESSION_NAMESPACE:-${OPENCLAW_SESSION_KEY:-${EXISTING_OPENCLAW_SESSION_NAMESPACE:-$DEFAULT_OPENCLAW_SESSION_NAMESPACE}}}"
 LOCAL_SAFE_GUARD="${LOCAL_SAFE_GUARD:-1}"
 
 if [[ "${LOCAL_SAFE_GUARD}" == "1" ]]; then
   if [[ -z "${CHANNEL_ID}" ]]; then
     CHANNEL_ID="${DEFAULT_CHANNEL_ID}"
   fi
-  if [[ -z "${OPENCLAW_SESSION_KEY}" ]]; then
-    OPENCLAW_SESSION_KEY="${DEFAULT_OPENCLAW_SESSION_KEY}"
+  if [[ -z "${OPENCLAW_SESSION_NAMESPACE}" ]]; then
+    OPENCLAW_SESSION_NAMESPACE="${DEFAULT_OPENCLAW_SESSION_NAMESPACE}"
   fi
 fi
 
@@ -130,7 +139,10 @@ if [[ -t 0 && -t 1 ]]; then
     CHANNEL_ID="$(prompt_default "channelId" "${CHANNEL_ID}")"
   done
 
+  DISPLAY_NAME="$(prompt_default "displayName" "${DISPLAY_NAME:-$CHANNEL_ID}")"
   DEVICE_ID="$(prompt_optional "deviceId")"
+  CAPABILITIES="$(prompt_default "capabilities(逗号分隔)" "${CAPABILITIES:-$DEFAULT_CAPABILITIES}")"
+  CHANNEL_TAGS="$(prompt_optional "channelTags(逗号分隔)")"
   REGISTER_TOKEN="$(prompt_default "registerToken" "${REGISTER_TOKEN}")"
 
   if prompt_yes_no "是否配置高级参数（心跳/重连/并发/OpenClaw 本地网关）?" "n"; then
@@ -139,17 +151,20 @@ if [[ -t 0 && -t 1 ]]; then
     MAX_CONCURRENT_INVOKES="$(prompt_default "maxConcurrentInvokes" "${MAX_CONCURRENT_INVOKES:-$DEFAULT_MAX_CONCURRENT_INVOKES}")"
     QUEUE_WAIT_TIMEOUT_MS="$(prompt_default "queueWaitTimeoutMs" "${QUEUE_WAIT_TIMEOUT_MS:-$DEFAULT_QUEUE_WAIT_TIMEOUT_MS}")"
     OPENCLAW_GATEWAY_URL="$(prompt_default "openclawGatewayUrl" "${OPENCLAW_GATEWAY_URL}")"
-    OPENCLAW_SESSION_KEY="$(prompt_default "openclawSessionKey" "${OPENCLAW_SESSION_KEY}")"
+    OPENCLAW_SESSION_NAMESPACE="$(prompt_default "openclawSessionNamespace(会话前缀)" "${OPENCLAW_SESSION_NAMESPACE}")"
   fi
 else
   WS_URL="${WS_URL:-${EXISTING_WS_URL:-$DEFAULT_WS_URL}}"
   CHANNEL_ID="${CHANNEL_ID:-${EXISTING_CHANNEL_ID:-$DEFAULT_CHANNEL_ID}}"
+  DISPLAY_NAME="${DISPLAY_NAME:-${EXISTING_DISPLAY_NAME:-$CHANNEL_ID}}"
+  CAPABILITIES="${CAPABILITIES:-${EXISTING_CAPABILITIES:-$DEFAULT_CAPABILITIES}}"
+  CHANNEL_TAGS="${CHANNEL_TAGS:-${EXISTING_CHANNEL_TAGS:-$DEFAULT_CHANNEL_TAGS}}"
   OPENCLAW_GATEWAY_URL="${OPENCLAW_GATEWAY_URL:-${EXISTING_OPENCLAW_GATEWAY_URL:-$DEFAULT_OPENCLAW_GATEWAY_URL}}"
-  OPENCLAW_SESSION_KEY="${OPENCLAW_SESSION_KEY:-${EXISTING_OPENCLAW_SESSION_KEY:-$DEFAULT_OPENCLAW_SESSION_KEY}}"
+  OPENCLAW_SESSION_NAMESPACE="${OPENCLAW_SESSION_NAMESPACE:-${OPENCLAW_SESSION_KEY:-${EXISTING_OPENCLAW_SESSION_NAMESPACE:-$DEFAULT_OPENCLAW_SESSION_NAMESPACE}}}"
 fi
 
-export WS_URL CHANNEL_ID DEVICE_ID REGISTER_TOKEN
-export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES QUEUE_WAIT_TIMEOUT_MS OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_KEY
+export WS_URL CHANNEL_ID DISPLAY_NAME DEVICE_ID CAPABILITIES CHANNEL_TAGS REGISTER_TOKEN
+export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES QUEUE_WAIT_TIMEOUT_MS OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_NAMESPACE
 
 python3 - <<'PY'
 import json
@@ -170,8 +185,15 @@ def maybe_int(name: str):
         return None
     return int(value)
 
+def parse_csv(name: str):
+    value = getenv(name, "")
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
 ws_url = getenv("WS_URL", "ws://81.70.216.46:8081/ws/channel-gateway")
 channel_id = getenv("CHANNEL_ID", "miao-node-local")
+display_name = getenv("DISPLAY_NAME", channel_id) or channel_id
 
 cfg = json.loads(config_path.read_text(encoding="utf-8"))
 plugins = cfg.setdefault("plugins", {})
@@ -186,6 +208,9 @@ plugin_config = {
     "enabled": True,
     "wsUrl": ws_url,
     "channelId": channel_id,
+    "displayName": display_name,
+    "capabilities": parse_csv("CAPABILITIES"),
+    "channelTags": parse_csv("CHANNEL_TAGS"),
 }
 
 device_id = getenv("DEVICE_ID")
@@ -216,9 +241,9 @@ openclaw_gateway_url = getenv("OPENCLAW_GATEWAY_URL")
 if openclaw_gateway_url:
     plugin_config["openclawGatewayUrl"] = openclaw_gateway_url
 
-openclaw_session_key = getenv("OPENCLAW_SESSION_KEY", "agent:local:main")
-if openclaw_session_key:
-    plugin_config["openclawSessionKey"] = openclaw_session_key
+openclaw_session_namespace = getenv("OPENCLAW_SESSION_NAMESPACE", "agent:local:main")
+if openclaw_session_namespace:
+    plugin_config["openclawSessionKey"] = openclaw_session_namespace
 
 entry["config"] = plugin_config
 

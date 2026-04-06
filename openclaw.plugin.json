@@ -11,14 +11,25 @@
       "enabled": { "type": "boolean", "description": "Enable gateway client service. Default: true" },
       "wsUrl": { "type": "string", "description": "Gateway websocket URL, e.g. ws://81.70.216.46:8081/ws/channel-gateway" },
       "channelId": { "type": "string", "description": "Unique channel id, e.g. miao-node-mac-mini" },
+      "displayName": { "type": "string", "description": "Readable channel name shown in App, e.g. My Mac Mini" },
       "deviceId": { "type": "string", "description": "Device id shown on backend status" },
+      "capabilities": {
+        "type": "array",
+        "description": "Capabilities exposed to backend, e.g. stream/file-input/file-output",
+        "items": { "type": "string" }
+      },
+      "channelTags": {
+        "type": "array",
+        "description": "Optional tags for filtering or diagnostics, e.g. local/mac/gpu",
+        "items": { "type": "string" }
+      },
       "registerToken": { "type": "string", "description": "Optional register token for gateway auth" },
       "heartbeatIntervalSec": { "type": "number", "description": "Heartbeat interval (seconds). Default: 20" },
       "reconnectMaxSec": { "type": "number", "description": "Reconnect backoff max (seconds). Default: 8" },
       "maxConcurrentInvokes": { "type": "number", "description": "Max invoke.start handled concurrently. Default: 1" },
       "queueWaitTimeoutMs": { "type": "number", "description": "Max wait time in queue before fail (ms). Default: 60000" },
       "openclawGatewayUrl": { "type": "string", "description": "Local OpenClaw gateway URL, default ws://127.0.0.1:18789" },
-      "openclawSessionKey": { "type": "string", "description": "Session key for chat.send, e.g. agent:main:miao-chat" }
+      "openclawSessionKey": { "type": "string", "description": "Session namespace prefix for chat.send; actual key becomes <prefix>:conv:<conversationId>" }
     }
   },
   "uiHints": {

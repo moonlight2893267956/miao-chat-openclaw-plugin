@@ -29,6 +29,21 @@ function resolveSecret(value) {
   return raw;
 }
 
+function resolveStringList(value, fallback = []) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return fallback;
+}
+
 function isValidWsUrl(value) {
   try {
     const url = new URL(value);
@@ -60,7 +75,10 @@ export function resolvePluginConfig(raw) {
     enabled: raw.enabled !== false,
     wsUrl,
     channelId: String(raw.channelId ?? "").trim(),
+    displayName: String(raw.displayName ?? raw.channelId ?? "").trim(),
     deviceId: String(raw.deviceId ?? os.hostname()).trim(),
+    capabilities: resolveStringList(raw.capabilities, ["stream", "retry", "heartbeat"]),
+    channelTags: resolveStringList(raw.channelTags, []),
     registerToken: resolveSecret(raw.registerToken ?? ""),
     heartbeatIntervalSec,
     reconnectMaxSec,

@@ -1,5 +1,9 @@
 {
   "enabled": true,
   "wsUrl": "ws://81.70.216.46:8081/ws/channel-gateway",
-  "channelId": "miao-node-local"
+  "channelId": "miao-node-local",
+  "displayName": "My Mac OpenClaw",
+  "capabilities": ["stream", "retry", "heartbeat"],
+  "channelTags": ["local", "mac"],
+  "openclawSessionKey": "agent:miao"
 }

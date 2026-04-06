@@ -1,4 +1,4 @@
-import { buildSocketAuth, extractMessageText, loadGatewayClientClass } from "./invoke-handler.js";
+import { buildSocketAuth, extractMessageText, loadGatewayClientClass, resolveOpenclawSessionKey } from "./invoke-handler.js";
 
 function shortId(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}${Date.now().toString(16).slice(-6)}`;
@@ -11,11 +11,6 @@ function emitCommandLog(logger, level, eventName, fields = {}) {
     event: eventName,
     ...fields,
   }));
-}
-
-function resolveSessionKey(config) {
-  const raw = String(config.openclawSessionKey ?? "").trim();
-  return raw || "";
 }
 
 function normalizeCommandText(command) {
@@ -32,9 +27,9 @@ function getCommandName(commandText) {
   return first.toLowerCase();
 }
 
-async function runSlashCommand(config, commandText, timeoutMs) {
+async function runSlashCommand(config, conversationId, commandText, timeoutMs) {
   const GatewayClient = await loadGatewayClientClass(config);
-  const sessionKey = resolveSessionKey(config);
+  const sessionKey = resolveOpenclawSessionKey(config, conversationId);
   const socketAuth = buildSocketAuth(config);
   const runId = `cmd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const commandName = getCommandName(commandText);
@@ -265,6 +260,7 @@ export async function handleCommandStart({ logger, wsSend, config, event }) {
   const payload = event.payload ?? {};
   const traceId = event.trace_id || "";
   const requestId = String(payload.request_id ?? "").trim();
+  const conversationId = String(payload.conversation_id ?? "").trim();
   const commandText = normalizeCommandText(payload.command);
   const timeoutMs = Number(payload.timeout_ms ?? 180000);
   const effectiveTimeoutMs = Number.isFinite(timeoutMs)
@@ -274,6 +270,7 @@ export async function handleCommandStart({ logger, wsSend, config, event }) {
   const baseFields = {
     channel_id: config.channelId || "",
     request_id: requestId || "",
+    conversation_id: conversationId || "",
     trace_id: traceId || "",
     command: commandText || "",
   };
@@ -308,10 +305,11 @@ export async function handleCommandStart({ logger, wsSend, config, event }) {
   const startedAtMs = Date.now();
   emitCommandLog(logger, "info", "command_start", {
     ...baseFields,
+    openclaw_session_key: resolveOpenclawSessionKey(config, conversationId),
     timeout_ms: effectiveTimeoutMs,
   });
   try {
-    const output = await runSlashCommand(config, commandText, effectiveTimeoutMs);
+    const output = await runSlashCommand(config, conversationId, commandText, effectiveTimeoutMs);
     wsSend({
       protocol_version: "channel.v0",
       msg_id: shortId(),

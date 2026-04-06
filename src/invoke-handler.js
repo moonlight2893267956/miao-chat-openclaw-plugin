@@ -502,9 +502,18 @@ function hasPendingRequest(requestId) {
   return pendingInvokeQueue.some((task) => task.requestId === requestId);
 }
 
-async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs, onDelta) {
+export function resolveOpenclawSessionKey(config, conversationId) {
+  const namespace = String(config?.openclawSessionKey ?? "").trim() || "agent:miao-chat";
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  if (!normalizedConversationId) {
+    return namespace;
+  }
+  return `${namespace}:conv:${normalizedConversationId}`;
+}
+
+async function streamOpenclaw(config, requestId, conversationId, prompt, attachments, timeoutMs, onDelta) {
   const GatewayClient = await loadGatewayClientClass(config);
-  const sessionKey = String(config.openclawSessionKey ?? "").trim();
+  const sessionKey = resolveOpenclawSessionKey(config, conversationId);
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
   const socketAuth = buildSocketAuth(config);
@@ -518,6 +527,7 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
     let usage = { input_tokens: 0, output_tokens: 0 };
     let currentText = "";
     let acceptedRunId = "";
+    let lastDeltaAtMs = 0;
 
     const settle = (error) => {
       if (settled) {
@@ -590,10 +600,23 @@ async function streamOpenclaw(config, requestId, prompt, attachments, timeoutMs,
             || String(payload?.text ?? payload?.content ?? "");
           const patch = computePatch(currentText, text);
           if (patch.text) {
+            const now = Date.now();
+            const splitGapMs = Number.isFinite(config?.streamBubbleSplitGapMs)
+              ? Math.max(1000, Math.round(config.streamBubbleSplitGapMs))
+              : 4000;
+            const shouldStartNewBubble = lastDeltaAtMs > 0
+              && currentText.trim().length > 0
+              && now - lastDeltaAtMs >= splitGapMs;
             currentText = text;
-            onDelta(patch);
+            lastDeltaAtMs = now;
+            onDelta({
+              text: patch.text,
+              replace: shouldStartNewBubble ? false : patch.replace,
+              newBubble: shouldStartNewBubble,
+            });
           } else if (text) {
             currentText = text;
+            lastDeltaAtMs = Date.now();
           }
           if (state === "final") {
             usage = normalizeUsage(payload?.usage);
@@ -643,6 +666,7 @@ async function runInvokeTask(task) {
     config,
     traceId,
     requestId,
+    conversationId,
     turnId,
     assistantMessageId,
     attachments,
@@ -661,6 +685,7 @@ async function runInvokeTask(task) {
 
   emitInvokeLog(logger, "info", "invoke_start", {
     ...baseFields,
+    openclaw_session_key: resolveOpenclawSessionKey(config, conversationId),
     timeout_ms: effectiveTimeoutMs,
     attachment_count: attachments.length,
     active_invokes: activeInvokeCount,
@@ -672,7 +697,7 @@ async function runInvokeTask(task) {
 
   try {
     let seq = 0;
-    const usage = await streamOpenclaw(config, requestId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
+    const usage = await streamOpenclaw(config, requestId, conversationId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
       seq += 1;
       wsSend({
         protocol_version: "channel.v0",
@@ -687,6 +712,7 @@ async function runInvokeTask(task) {
           seq,
           delta: chunk.text,
           replace: chunk.replace === true,
+          new_bubble: chunk.newBubble === true,
           is_final: false,
         },
       });
@@ -767,6 +793,7 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const payload = event.payload ?? {};
   const traceId = event.trace_id || "";
   const requestId = String(payload.request_id ?? "").trim();
+  const conversationId = String(payload.conversation_id ?? "").trim();
   const turnId = String(payload.turn_id ?? "").trim();
   const assistantMessageId = String(payload.assistant_message_id ?? "").trim();
   const prompt = String(payload?.prompt?.content ?? "");
@@ -779,6 +806,7 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const baseFields = {
     channel_id: config.channelId || "",
     request_id: requestId || "",
+    conversation_id: conversationId || "",
     turn_id: turnId || "",
     assistant_message_id: assistantMessageId || "",
     trace_id: traceId || "",
@@ -851,6 +879,7 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
     config,
     traceId,
     requestId,
+    conversationId,
     turnId,
     assistantMessageId,
     attachments,

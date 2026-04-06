@@ -118,9 +118,11 @@ export function createGatewayClient({ api, config }) {
       ts: new Date().toISOString(),
       payload: {
         channel_id: config.channelId,
+        display_name: config.displayName || config.channelId,
         device_id: config.deviceId,
         plugin_version: config.pluginVersion,
-        capabilities: ["stream", "retry", "heartbeat"],
+        capabilities: Array.isArray(config.capabilities) ? config.capabilities : ["stream", "retry", "heartbeat"],
+        channel_tags: Array.isArray(config.channelTags) ? config.channelTags : [],
         auth: {
           type: "bearer",
           token: config.registerToken,

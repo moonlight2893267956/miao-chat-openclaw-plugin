@@ -29,6 +29,21 @@ function resolveSecret(value) {
   return raw;
 }
 
+function resolveStringList(value, fallback = []) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return fallback;
+}
+
 function isValidWsUrl(value) {
   try {
     const url = new URL(value);
@@ -46,6 +61,7 @@ export function resolvePluginConfig(raw) {
   const reconnectMaxSec = clampInt(parseNumber(raw.reconnectMaxSec ?? 8, 8), 1, 120);
   const maxConcurrentInvokes = clampInt(parseNumber(raw.maxConcurrentInvokes ?? 1, 1), 1, 8);
   const queueWaitTimeoutMs = clampInt(parseNumber(raw.queueWaitTimeoutMs ?? 60000, 60000), 1000, 600000);
+  const streamBubbleSplitGapMs = clampInt(parseNumber(raw.streamBubbleSplitGapMs ?? 4000, 4000), 1000, 15000);
   if (!isValidWsUrl(wsUrl)) {
     warnings.push("wsUrl is invalid; expected ws:// or wss://");
   }
@@ -60,12 +76,16 @@ export function resolvePluginConfig(raw) {
     enabled: raw.enabled !== false,
     wsUrl,
     channelId: String(raw.channelId ?? "").trim(),
+    displayName: String(raw.displayName ?? raw.channelId ?? "").trim(),
     deviceId: String(raw.deviceId ?? os.hostname()).trim(),
+    capabilities: resolveStringList(raw.capabilities, ["stream", "retry", "heartbeat"]),
+    channelTags: resolveStringList(raw.channelTags, []),
     registerToken: resolveSecret(raw.registerToken ?? ""),
     heartbeatIntervalSec,
     reconnectMaxSec,
     maxConcurrentInvokes,
     queueWaitTimeoutMs,
+    streamBubbleSplitGapMs,
     openclawGatewayUrl,
     openclawSessionKey: String(raw.openclawSessionKey ?? "").trim(),
     configWarnings: warnings,

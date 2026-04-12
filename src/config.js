@@ -61,6 +61,7 @@ export function resolvePluginConfig(raw) {
   const reconnectMaxSec = clampInt(parseNumber(raw.reconnectMaxSec ?? 8, 8), 1, 120);
   const maxConcurrentInvokes = clampInt(parseNumber(raw.maxConcurrentInvokes ?? 1, 1), 1, 8);
   const queueWaitTimeoutMs = clampInt(parseNumber(raw.queueWaitTimeoutMs ?? 60000, 60000), 1000, 600000);
+  const invokeIdleTimeoutMs = clampInt(parseNumber(raw.invokeIdleTimeoutMs ?? 180000, 180000), 15000, 600000);
   const streamBubbleSplitGapMs = clampInt(parseNumber(raw.streamBubbleSplitGapMs ?? 4000, 4000), 1000, 15000);
   if (!isValidWsUrl(wsUrl)) {
     warnings.push("wsUrl is invalid; expected ws:// or wss://");
@@ -85,6 +86,7 @@ export function resolvePluginConfig(raw) {
     reconnectMaxSec,
     maxConcurrentInvokes,
     queueWaitTimeoutMs,
+    invokeIdleTimeoutMs,
     streamBubbleSplitGapMs,
     openclawGatewayUrl,
     openclawSessionKey: String(raw.openclawSessionKey ?? "").trim(),

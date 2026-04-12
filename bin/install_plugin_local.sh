@@ -14,12 +14,18 @@ DEFAULT_HEARTBEAT_SEC="20"
 DEFAULT_RECONNECT_MAX_SEC="8"
 DEFAULT_MAX_CONCURRENT_INVOKES="1"
 DEFAULT_QUEUE_WAIT_TIMEOUT_MS="60000"
+DEFAULT_INVOKE_IDLE_TIMEOUT_MS="180000"
 DEFAULT_STREAM_BUBBLE_SPLIT_GAP_MS="4000"
 DEFAULT_OPENCLAW_GATEWAY_URL="ws://127.0.0.1:18789"
 DEFAULT_OPENCLAW_SESSION_NAMESPACE="agent:local:main"
 DEFAULT_REGISTER_TOKEN="miao_reg_jnpIHD4gxsphosDUt-Vcoy3P"
 DEFAULT_CAPABILITIES="stream,retry,heartbeat"
 DEFAULT_CHANNEL_TAGS=""
+DEFAULT_INSTALL_FILE_OUTPUT_SKILL="${INSTALL_FILE_OUTPUT_SKILL:-0}"
+DEFAULT_SKILL_TARGET_DIR="${SKILL_TARGET_DIR:-${HOME}/.openclaw/workspace/skills/miaochat-file-output}"
+DEFAULT_SKILL_API_BASE="${SKILL_API_BASE:-http://127.0.0.1:8081}"
+DEFAULT_SKILL_USER_ID="${SKILL_USER_ID:-}"
+DEFAULT_SKILL_TOKEN="${SKILL_TOKEN:-}"
 
 load_existing_config_value() {
   local key="$1"
@@ -117,6 +123,7 @@ EXISTING_HEARTBEAT_SEC="$(load_existing_config_value "heartbeatIntervalSec" || t
 EXISTING_RECONNECT_MAX_SEC="$(load_existing_config_value "reconnectMaxSec" || true)"
 EXISTING_MAX_CONCURRENT_INVOKES="$(load_existing_config_value "maxConcurrentInvokes" || true)"
 EXISTING_QUEUE_WAIT_TIMEOUT_MS="$(load_existing_config_value "queueWaitTimeoutMs" || true)"
+EXISTING_INVOKE_IDLE_TIMEOUT_MS="$(load_existing_config_value "invokeIdleTimeoutMs" || true)"
 EXISTING_STREAM_BUBBLE_SPLIT_GAP_MS="$(load_existing_config_value "streamBubbleSplitGapMs" || true)"
 EXISTING_OPENCLAW_GATEWAY_URL="$(load_existing_config_value "openclawGatewayUrl" || true)"
 EXISTING_OPENCLAW_SESSION_NAMESPACE="$(load_existing_config_value "openclawSessionKey" || true)"
@@ -132,6 +139,7 @@ HEARTBEAT_SEC="${HEARTBEAT_SEC:-${EXISTING_HEARTBEAT_SEC:-}}"
 RECONNECT_MAX_SEC="${RECONNECT_MAX_SEC:-${EXISTING_RECONNECT_MAX_SEC:-}}"
 MAX_CONCURRENT_INVOKES="${MAX_CONCURRENT_INVOKES:-${EXISTING_MAX_CONCURRENT_INVOKES:-}}"
 QUEUE_WAIT_TIMEOUT_MS="${QUEUE_WAIT_TIMEOUT_MS:-${EXISTING_QUEUE_WAIT_TIMEOUT_MS:-}}"
+INVOKE_IDLE_TIMEOUT_MS="${INVOKE_IDLE_TIMEOUT_MS:-${EXISTING_INVOKE_IDLE_TIMEOUT_MS:-}}"
 STREAM_BUBBLE_SPLIT_GAP_MS="${STREAM_BUBBLE_SPLIT_GAP_MS:-${EXISTING_STREAM_BUBBLE_SPLIT_GAP_MS:-}}"
 OPENCLAW_GATEWAY_URL="${OPENCLAW_GATEWAY_URL:-${EXISTING_OPENCLAW_GATEWAY_URL:-$DEFAULT_OPENCLAW_GATEWAY_URL}}"
 OPENCLAW_SESSION_NAMESPACE="${OPENCLAW_SESSION_NAMESPACE:-${OPENCLAW_SESSION_KEY:-${EXISTING_OPENCLAW_SESSION_NAMESPACE:-$DEFAULT_OPENCLAW_SESSION_NAMESPACE}}}"
@@ -171,6 +179,7 @@ if [[ -t 0 && -t 1 ]]; then
     RECONNECT_MAX_SEC="$(prompt_default "reconnectMaxSec" "${RECONNECT_MAX_SEC:-$DEFAULT_RECONNECT_MAX_SEC}")"
     MAX_CONCURRENT_INVOKES="$(prompt_default "maxConcurrentInvokes" "${MAX_CONCURRENT_INVOKES:-$DEFAULT_MAX_CONCURRENT_INVOKES}")"
     QUEUE_WAIT_TIMEOUT_MS="$(prompt_default "queueWaitTimeoutMs" "${QUEUE_WAIT_TIMEOUT_MS:-$DEFAULT_QUEUE_WAIT_TIMEOUT_MS}")"
+    INVOKE_IDLE_TIMEOUT_MS="$(prompt_default "invokeIdleTimeoutMs" "${INVOKE_IDLE_TIMEOUT_MS:-$DEFAULT_INVOKE_IDLE_TIMEOUT_MS}")"
     STREAM_BUBBLE_SPLIT_GAP_MS="$(prompt_default "streamBubbleSplitGapMs" "${STREAM_BUBBLE_SPLIT_GAP_MS:-$DEFAULT_STREAM_BUBBLE_SPLIT_GAP_MS}")"
     OPENCLAW_GATEWAY_URL="$(prompt_default "openclawGatewayUrl" "${OPENCLAW_GATEWAY_URL}")"
     OPENCLAW_SESSION_NAMESPACE="$(prompt_default "openclawSessionNamespace(会话前缀)" "${OPENCLAW_SESSION_NAMESPACE}")"
@@ -186,7 +195,7 @@ else
 fi
 
 export WS_URL CHANNEL_ID DISPLAY_NAME DEVICE_ID CAPABILITIES CHANNEL_TAGS REGISTER_TOKEN
-export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES QUEUE_WAIT_TIMEOUT_MS STREAM_BUBBLE_SPLIT_GAP_MS OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_NAMESPACE
+export HEARTBEAT_SEC RECONNECT_MAX_SEC MAX_CONCURRENT_INVOKES QUEUE_WAIT_TIMEOUT_MS INVOKE_IDLE_TIMEOUT_MS STREAM_BUBBLE_SPLIT_GAP_MS OPENCLAW_GATEWAY_URL OPENCLAW_SESSION_NAMESPACE
 
 python3 - <<'PY'
 import json
@@ -259,6 +268,10 @@ queue_wait_timeout_ms = maybe_int("QUEUE_WAIT_TIMEOUT_MS")
 if queue_wait_timeout_ms is not None:
     plugin_config["queueWaitTimeoutMs"] = queue_wait_timeout_ms
 
+invoke_idle_timeout_ms = maybe_int("INVOKE_IDLE_TIMEOUT_MS")
+if invoke_idle_timeout_ms is not None:
+    plugin_config["invokeIdleTimeoutMs"] = invoke_idle_timeout_ms
+
 stream_bubble_split_gap_ms = maybe_int("STREAM_BUBBLE_SPLIT_GAP_MS")
 if stream_bubble_split_gap_ms is not None:
     plugin_config["streamBubbleSplitGapMs"] = stream_bubble_split_gap_ms
@@ -290,5 +303,39 @@ print(f"[OK] openclaw config: {config_path}")
 print(f"[OK] plugin path: {ext_dir}")
 print("[OK] plugin config keys:", ", ".join(sorted(plugin_config.keys())))
 PY
+
+INSTALL_FILE_OUTPUT_SKILL="${DEFAULT_INSTALL_FILE_OUTPUT_SKILL}"
+SKILL_TARGET_DIR="${DEFAULT_SKILL_TARGET_DIR}"
+SKILL_API_BASE="${DEFAULT_SKILL_API_BASE}"
+SKILL_USER_ID="${DEFAULT_SKILL_USER_ID}"
+SKILL_TOKEN="${DEFAULT_SKILL_TOKEN}"
+
+if [[ -t 0 && -t 1 ]]; then
+  if prompt_yes_no "是否安装 miaochat-file-output skill?" "n"; then
+    INSTALL_FILE_OUTPUT_SKILL="1"
+    SKILL_TARGET_DIR="$(prompt_default "skill 目标目录" "${DEFAULT_SKILL_TARGET_DIR}")"
+    SKILL_API_BASE="$(prompt_default "skill apiBase" "${DEFAULT_SKILL_API_BASE}")"
+    SKILL_USER_ID="$(prompt_optional_with_default "skill userId(可留空)" "${DEFAULT_SKILL_USER_ID}")"
+    SKILL_TOKEN="$(prompt_optional_with_default "skill token(可留空)" "${DEFAULT_SKILL_TOKEN}")"
+  else
+    INSTALL_FILE_OUTPUT_SKILL="0"
+  fi
+fi
+
+if [[ "${INSTALL_FILE_OUTPUT_SKILL}" == "1" ]]; then
+  SKILL_INSTALLER="${EXT_DIR}/skills/miaochat_file_output/install_skill.sh"
+  if [[ ! -f "${SKILL_INSTALLER}" ]]; then
+    echo "[WARN] skill installer not found: ${SKILL_INSTALLER}"
+  else
+    SKILL_CMD=(bash "${SKILL_INSTALLER}" --no-legacy-link --target-dir "${SKILL_TARGET_DIR}" --api-base "${SKILL_API_BASE}")
+    if [[ -n "${SKILL_USER_ID}" ]]; then
+      SKILL_CMD+=(--user-id "${SKILL_USER_ID}")
+    fi
+    if [[ -n "${SKILL_TOKEN}" ]]; then
+      SKILL_CMD+=(--token "${SKILL_TOKEN}")
+    fi
+    "${SKILL_CMD[@]}"
+  fi
+fi
 
 echo "[DONE] install completed"

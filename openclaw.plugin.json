@@ -28,6 +28,7 @@
       "reconnectMaxSec": { "type": "number", "description": "Reconnect backoff max (seconds). Default: 8" },
       "maxConcurrentInvokes": { "type": "number", "description": "Max invoke.start handled concurrently. Default: 1" },
       "queueWaitTimeoutMs": { "type": "number", "description": "Max wait time in queue before fail (ms). Default: 60000" },
+      "invokeIdleTimeoutMs": { "type": "number", "description": "Max idle time waiting for OpenClaw stream events before fail (ms). Default: 180000" },
       "streamBubbleSplitGapMs": { "type": "number", "description": "Split assistant bubbles when stream gap exceeds this threshold (ms). Default: 4000" },
       "openclawGatewayUrl": { "type": "string", "description": "Local OpenClaw gateway URL, default ws://127.0.0.1:18789" },
       "openclawSessionKey": { "type": "string", "description": "Session namespace prefix for chat.send; actual key becomes <prefix>:conv:<conversationId>" }

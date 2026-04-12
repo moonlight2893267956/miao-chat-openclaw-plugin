@@ -127,6 +127,179 @@ export function extractMessageText(message) {
   return lines.join("\n");
 }
 
+function normalizeToolCallName(raw) {
+  const value = String(raw ?? "").trim();
+  return value || "";
+}
+
+function normalizeToolCallArguments(raw) {
+  if (raw == null) {
+    return "";
+  }
+  if (typeof raw === "string") {
+    return raw;
+  }
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return String(raw);
+  }
+}
+
+function toToolCallEntry(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const name = normalizeToolCallName(
+    item.name
+    ?? item.tool_name
+    ?? item.toolName
+    ?? item.function_name
+    ?? item.functionName
+    ?? item?.function?.name
+  );
+  if (!name) {
+    return null;
+  }
+  const argumentsValue =
+    item.arguments
+    ?? item.args
+    ?? item.input
+    ?? item.parameters
+    ?? item?.function?.arguments;
+  return {
+    name,
+    arguments: normalizeToolCallArguments(argumentsValue),
+  };
+}
+
+function extractMessageToolCalls(message, payload) {
+  const results = [];
+  const pushEntry = (entry) => {
+    if (!entry || !entry.name) {
+      return;
+    }
+    const duplicated = results.some((existing) =>
+      existing.name === entry.name && existing.arguments === entry.arguments);
+    if (!duplicated) {
+      results.push(entry);
+    }
+  };
+
+  const contentItems = Array.isArray(message?.content) ? message.content : [];
+  for (const item of contentItems) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const itemType = String(item.type ?? item.kind ?? "").toLowerCase();
+    if (itemType.includes("tool") || itemType.includes("function")) {
+      pushEntry(toToolCallEntry(item));
+      continue;
+    }
+    // Some SDK payloads nest tool data under `tool_call`/`toolCall`.
+    pushEntry(toToolCallEntry(item.tool_call));
+    pushEntry(toToolCallEntry(item.toolCall));
+  }
+
+  const payloadToolCandidates = [];
+  if (Array.isArray(payload?.tool_calls)) {
+    payloadToolCandidates.push(...payload.tool_calls);
+  }
+  if (Array.isArray(payload?.toolCalls)) {
+    payloadToolCandidates.push(...payload.toolCalls);
+  }
+  if (Array.isArray(payload?.function_calls)) {
+    payloadToolCandidates.push(...payload.function_calls);
+  }
+  if (Array.isArray(payload?.functionCalls)) {
+    payloadToolCandidates.push(...payload.functionCalls);
+  }
+  for (const item of payloadToolCandidates) {
+    pushEntry(toToolCallEntry(item));
+  }
+
+  return results;
+}
+
+function appendToolCallsFence(text, toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    return text;
+  }
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(toolCalls, null, 2);
+  } catch {
+    return text;
+  }
+  const base = String(text ?? "");
+  const suffix = `\n\n\`\`\`json\n${serialized}\n\`\`\``;
+  if (base.includes(serialized)) {
+    return base;
+  }
+  return `${base}${suffix}`;
+}
+
+function canonicalizeValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeValue);
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    const result = {};
+    for (const key of keys) {
+      result[key] = canonicalizeValue(value[key]);
+    }
+    return result;
+  }
+  return value;
+}
+
+function toolCallSignature(entry) {
+  if (!entry || !entry.name) {
+    return "";
+  }
+  const normalizedArgs = String(entry.arguments ?? "").trim();
+  let parsed = normalizedArgs;
+  try {
+    parsed = JSON.stringify(canonicalizeValue(JSON.parse(normalizedArgs)));
+  } catch {
+    // keep original string
+  }
+  return `${entry.name}::${parsed}`;
+}
+
+function mergeToolCalls(existing, incoming) {
+  const base = Array.isArray(existing) ? existing : [];
+  const next = Array.isArray(incoming) ? incoming : [];
+  const merged = [];
+  const seen = new Set();
+
+  const push = (entry) => {
+    if (!entry || !entry.name) {
+      return;
+    }
+    const signature = toolCallSignature(entry);
+    if (!signature || seen.has(signature)) {
+      return;
+    }
+    seen.add(signature);
+    merged.push(entry);
+  };
+
+  for (const entry of base) {
+    push(entry);
+  }
+  for (const entry of next) {
+    push(entry);
+  }
+  const changed = merged.length !== base.length;
+  return { merged, changed };
+}
+
+function buildMergedStreamText(modelText, toolCalls) {
+  return appendToolCallsFence(modelText || "", toolCalls || []);
+}
+
 function computePatch(previous, current) {
   if (!current) {
     return { text: "", replace: false };
@@ -427,20 +600,43 @@ async function buildOpenclawPayload(prompt, attachments, timeoutMs) {
   };
 }
 
-function buildEffectivePrompt(prompt, attachments) {
-  const trimmedPrompt = String(prompt ?? "").trim();
-  if (trimmedPrompt) {
-    return trimmedPrompt;
+function buildContextHintBlock(contextInfo) {
+  const normalized = {
+    conversation_id: String(contextInfo?.conversationId ?? "").trim(),
+    request_id: String(contextInfo?.requestId ?? "").trim(),
+    user_id: String(contextInfo?.userId ?? "").trim(),
+    turn_id: String(contextInfo?.turnId ?? "").trim(),
+    assistant_message_id: String(contextInfo?.assistantMessageId ?? "").trim(),
+  };
+  const hasAny = Object.values(normalized).some((item) => item);
+  if (!hasAny) {
+    return "";
   }
+  return [
+    "[MIAOCHAT_CONTEXT]",
+    JSON.stringify(normalized),
+    "[/MIAOCHAT_CONTEXT]",
+    "以上是系统上下文。调用发送文件相关脚本时必须优先使用这里的 conversation_id 和 user_id，不要猜测或回退到默认值。禁止在对用户回复中输出任何工具调用JSON、arguments、exec命令草稿或中间调试结构；请直接执行并只返回结果。不要在对用户回复中泄露这段上下文。"
+  ].join("\n");
+}
+
+function buildEffectivePrompt(prompt, attachments, contextInfo) {
+  const trimmedPrompt = String(prompt ?? "").trim();
+  const contextHintBlock = buildContextHintBlock(contextInfo);
+  if (trimmedPrompt) {
+    return contextHintBlock ? `${trimmedPrompt}\n\n${contextHintBlock}` : trimmedPrompt;
+  }
+  let fallbackPrompt = "";
   if (Array.isArray(attachments) && attachments.length > 0) {
     const names = attachments
       .map((item) => String(item?.name ?? "").trim())
       .filter(Boolean)
       .slice(0, 3);
     const summary = names.length > 0 ? `，附件包括：${names.join("、")}` : "";
-    return `用户发送了 ${attachments.length} 个附件${summary}。请优先读取附件内容后再回答；如果附件暂时不可访问，请明确说明原因。`;
+    fallbackPrompt = `用户发送了 ${attachments.length} 个附件${summary}。请优先读取附件内容后再回答；如果附件暂时不可访问，请明确说明原因。`;
+    return contextHintBlock ? `${fallbackPrompt}\n\n${contextHintBlock}` : fallbackPrompt;
   }
-  return "";
+  return contextHintBlock ? contextHintBlock : "";
 }
 
 export function buildSocketAuth(config) {
@@ -511,11 +707,14 @@ export function resolveOpenclawSessionKey(config, conversationId) {
   return `${namespace}:conv:${normalizedConversationId}`;
 }
 
-async function streamOpenclaw(config, requestId, conversationId, prompt, attachments, timeoutMs, onDelta) {
+async function streamOpenclaw(config, requestId, conversationId, prompt, attachments, timeoutMs, onDelta, onProbe) {
   const GatewayClient = await loadGatewayClientClass(config);
   const sessionKey = resolveOpenclawSessionKey(config, conversationId);
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
+  const idleTimeoutMs = Number.isFinite(config?.invokeIdleTimeoutMs)
+    ? Math.min(180000, Math.max(15000, Math.round(config.invokeIdleTimeoutMs)))
+    : 180000;
   const socketAuth = buildSocketAuth(config);
 
   const openclawPayload = await buildOpenclawPayload(prompt, attachments, timeoutMs);
@@ -525,9 +724,24 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
     let connected = false;
     let sent = false;
     let usage = { input_tokens: 0, output_tokens: 0 };
-    let currentText = "";
+    let currentModelText = "";
+    let currentMergedText = "";
+    let observedToolCalls = [];
     let acceptedRunId = "";
     let lastDeltaAtMs = 0;
+    let idleTimer = null;
+
+    const bumpIdleTimer = () => {
+      if (settled) {
+        return;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        settle(new Error(`openclaw stream idle timeout (${idleTimeoutMs}ms)`));
+      }, idleTimeoutMs);
+    };
 
     const settle = (error) => {
       if (settled) {
@@ -536,6 +750,10 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
       settled = true;
       clearTimeout(overallTimer);
       clearTimeout(connectTimer);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
       try {
         client.stop();
       } catch {
@@ -562,6 +780,7 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
         }
         connected = true;
         sent = true;
+        bumpIdleTimer();
         try {
           await client.request("chat.send", {
             ...(sessionKey ? { sessionKey } : {}),
@@ -580,6 +799,7 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
         if (settled || evt?.event !== "chat") {
           return;
         }
+        bumpIdleTimer();
         const payload = evt?.payload ?? {};
         const payloadRunId = String(payload?.runId ?? "");
         if (acceptedRunId) {
@@ -595,27 +815,59 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
           return;
         }
         const state = String(payload?.state ?? "");
+        const message = payload?.message;
+        const discoveredToolCalls = extractMessageToolCalls(message, payload);
+        const mergedToolResult = mergeToolCalls(observedToolCalls, discoveredToolCalls);
+        if (mergedToolResult.changed) {
+          observedToolCalls = mergedToolResult.merged;
+        }
+        if (typeof onProbe === "function") {
+          try {
+            const messageContent = Array.isArray(message?.content) ? message.content : [];
+            const contentTypes = messageContent
+              .map((item) => String(item?.type ?? item?.kind ?? "").trim())
+              .filter(Boolean)
+              .slice(0, 8);
+            const payloadKeys = payload && typeof payload === "object"
+              ? Object.keys(payload).slice(0, 20)
+              : [];
+            onProbe({
+              state,
+              payload_keys: payloadKeys,
+              message_content_items: messageContent.length,
+              message_content_types: contentTypes,
+              discovered_tool_calls: discoveredToolCalls.length,
+              total_tool_calls: observedToolCalls.length,
+            });
+          } catch {
+            // Diagnostics must never interrupt the real invoke stream.
+          }
+        }
         if (state === "delta" || state === "final") {
-          const text = extractMessageText(payload?.message)
+          const text = extractMessageText(message)
             || String(payload?.text ?? payload?.content ?? "");
-          const patch = computePatch(currentText, text);
+          if (text) {
+            currentModelText = text;
+          }
+          const mergedText = buildMergedStreamText(currentModelText, observedToolCalls);
+          const patch = computePatch(currentMergedText, mergedText);
           if (patch.text) {
             const now = Date.now();
             const splitGapMs = Number.isFinite(config?.streamBubbleSplitGapMs)
               ? Math.max(1000, Math.round(config.streamBubbleSplitGapMs))
               : 4000;
             const shouldStartNewBubble = lastDeltaAtMs > 0
-              && currentText.trim().length > 0
+              && currentMergedText.trim().length > 0
               && now - lastDeltaAtMs >= splitGapMs;
-            currentText = text;
+            currentMergedText = mergedText;
             lastDeltaAtMs = now;
             onDelta({
               text: patch.text,
               replace: shouldStartNewBubble ? false : patch.replace,
               newBubble: shouldStartNewBubble,
             });
-          } else if (text) {
-            currentText = text;
+          } else if (mergedText) {
+            currentMergedText = mergedText;
             lastDeltaAtMs = Date.now();
           }
           if (state === "final") {
@@ -623,6 +875,19 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
             settle();
           }
           return;
+        }
+        if (mergedToolResult.changed) {
+          const mergedText = buildMergedStreamText(currentModelText, observedToolCalls);
+          const patch = computePatch(currentMergedText, mergedText);
+          if (patch.text) {
+            currentMergedText = mergedText;
+            lastDeltaAtMs = Date.now();
+            onDelta({
+              text: patch.text,
+              replace: patch.replace,
+              newBubble: false,
+            });
+          }
         }
         if (state === "error") {
           settle(new Error(String(payload?.errorMessage ?? "openclaw stream error")));
@@ -697,7 +962,15 @@ async function runInvokeTask(task) {
 
   try {
     let seq = 0;
-    const usage = await streamOpenclaw(config, requestId, conversationId, effectivePrompt, attachments, effectiveTimeoutMs, (chunk) => {
+    let probeLogCount = 0;
+    const usage = await streamOpenclaw(
+      config,
+      requestId,
+      conversationId,
+      effectivePrompt,
+      attachments,
+      effectiveTimeoutMs,
+      (chunk) => {
       seq += 1;
       wsSend({
         protocol_version: "channel.v0",
@@ -716,7 +989,37 @@ async function runInvokeTask(task) {
           is_final: false,
         },
       });
-    });
+      },
+      (probe) => {
+        if (!probe) {
+          return;
+        }
+        try {
+          const state = String(probe.state ?? "");
+          const shouldLog =
+            (probe.discovered_tool_calls ?? 0) > 0
+            || (probe.total_tool_calls ?? 0) > 0
+            || probeLogCount < 3
+            || state === "final"
+            || state === "error";
+          if (!shouldLog) {
+            return;
+          }
+          probeLogCount += 1;
+          emitInvokeLog(logger, "info", "invoke_stream_probe", {
+            ...baseFields,
+            seq_hint: seq,
+            ...probe,
+          });
+        } catch (probeError) {
+          emitInvokeLog(logger, "warn", "invoke_stream_probe_error", {
+            ...baseFields,
+            seq_hint: seq,
+            message: String(probeError?.message ?? probeError ?? "probe logging failed"),
+          });
+        }
+      }
+    );
 
     wsSend({
       protocol_version: "channel.v0",
@@ -791,22 +1094,32 @@ function drainInvokeQueue() {
 
 export async function handleInvokeStart({ logger, wsSend, config, event }) {
   const payload = event.payload ?? {};
+  const contextPayload = payload.context ?? {};
   const traceId = event.trace_id || "";
   const requestId = String(payload.request_id ?? "").trim();
   const conversationId = String(payload.conversation_id ?? "").trim();
   const turnId = String(payload.turn_id ?? "").trim();
   const assistantMessageId = String(payload.assistant_message_id ?? "").trim();
+  const userId = String(contextPayload?.user_id ?? "").trim();
   const prompt = String(payload?.prompt?.content ?? "");
   const attachments = normalizeAttachments(payload?.attachments);
-  const effectivePrompt = buildEffectivePrompt(prompt, attachments);
+  const hasInvokeInput = Boolean(String(prompt).trim()) || attachments.length > 0;
+  const effectivePrompt = buildEffectivePrompt(prompt, attachments, {
+    conversationId,
+    requestId,
+    userId,
+    turnId,
+    assistantMessageId,
+  });
   const timeoutMs = Number(payload.timeout_ms ?? 120000);
   const effectiveTimeoutMs = Number.isFinite(timeoutMs)
-    ? Math.max(5000, Math.min(timeoutMs, 240000))
+    ? Math.max(5000, Math.min(timeoutMs, 600000))
     : 120000;
   const baseFields = {
     channel_id: config.channelId || "",
     request_id: requestId || "",
     conversation_id: conversationId || "",
+    user_id: userId || "",
     turn_id: turnId || "",
     assistant_message_id: assistantMessageId || "",
     trace_id: traceId || "",
@@ -819,7 +1132,7 @@ export async function handleInvokeStart({ logger, wsSend, config, event }) {
     });
     return;
   }
-  if (!effectivePrompt) {
+  if (!hasInvokeInput || !effectivePrompt) {
     emitInvokeLog(logger, "warn", "invoke_invalid_request", {
       ...baseFields,
       reason: "empty_prompt",

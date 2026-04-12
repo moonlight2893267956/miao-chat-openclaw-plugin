@@ -25,6 +25,13 @@ Miao Chat 的 OpenClaw 插件版网关客户端。
 - `scripts/verify_channel_reconnect.sh`: 重启 OpenClaw 后验证重连恢复时间
 - `scripts/verify_channel_longrun.sh`: 长时间稳定性巡检
 
+### 助手输出文件 Skill（新增）
+
+- `skills/miaochat_file_output/send_generated_file.py`: 上传生成文件并回调会话附件
+- `skills/miaochat_file_output/install_skill.sh`: 安装 skill 到 OpenClaw 目录
+- `skills/miaochat_file_output/verify_skill.sh`: 端到端健康检查
+- `skills/miaochat_file_output/verify_assistant_output_e2e.sh`: 只传 `conversation_id` 的一键验收脚本
+
 ### 历史脚本
 
 - `scripts/legacy/`: 旧的固定双通道验证脚本，仅用于回溯历史问题
@@ -60,6 +67,7 @@ bash bin/install_plugin_local.sh
 - `plugins.entries.openclaw-miao-gateway.config.reconnectMaxSec`: 重连上限，默认 8
 - `plugins.entries.openclaw-miao-gateway.config.maxConcurrentInvokes`: 插件并发上限，默认 1
 - `plugins.entries.openclaw-miao-gateway.config.queueWaitTimeoutMs`: 请求在队列中最长等待时间，默认 60000ms
+- `plugins.entries.openclaw-miao-gateway.config.invokeIdleTimeoutMs`: 单次调用等待 OpenClaw 流事件的空闲超时，默认 180000ms
 - `plugins.entries.openclaw-miao-gateway.config.streamBubbleSplitGapMs`: 同一轮回复里，两次增量间隔超过该阈值时自动新起一个 assistant 气泡，默认 4000ms
 - `plugins.entries.openclaw-miao-gateway.config.openclawGatewayUrl`: 本地 OpenClaw 网关地址，默认 `ws://127.0.0.1:18789`
 - `plugins.entries.openclaw-miao-gateway.config.openclawSessionKey`: OpenClaw 会话命名空间前缀，实际会按 `prefix:conv:{conversationId}` 生成，默认 `agent:local:main`
@@ -94,8 +102,22 @@ bash bin/install_plugin_server.sh
 - `capabilities`
 - `channelTags`
 - `registerToken`
-- 高级参数：`heartbeatIntervalSec` / `reconnectMaxSec` / `maxConcurrentInvokes` / `queueWaitTimeoutMs` / `streamBubbleSplitGapMs` / `openclawGatewayUrl` / `openclawSessionNamespace`
+- 高级参数：`heartbeatIntervalSec` / `reconnectMaxSec` / `maxConcurrentInvokes` / `queueWaitTimeoutMs` / `invokeIdleTimeoutMs` / `streamBubbleSplitGapMs` / `openclawGatewayUrl` / `openclawSessionNamespace`
 - `BACKEND_BASE`（在线校验用）
+- 是否安装 `miaochat-file-output` skill（默认安装）
+- skill 参数：`target-dir` / `apiBase` / `userId` / `token`（后两项可留空）
+
+当选择安装 skill 时，部署脚本会在远端自动执行：
+
+```bash
+bash skills/miaochat_file_output/install_skill.sh --no-legacy-link --target-dir ... --api-base ...
+```
+
+默认安装目录：
+
+```bash
+~/.openclaw/workspace/skills/miaochat-file-output
+```
 
 ### 2) 在线校验
 

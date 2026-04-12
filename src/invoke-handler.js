@@ -6,6 +6,16 @@ import http from "node:http";
 import https from "node:https";
 
 const LOCAL_ATTACHMENT_DIR = "/tmp/openclaw/input";
+const DIAG_FILE = "/tmp/miao-gateway-diag.jsonl";
+
+function diagLog(entry) {
+  try {
+    const line = JSON.stringify({ ...entry, ts: new Date().toISOString() }) + "\n";
+    fs.appendFileSync(DIAG_FILE, line);
+  } catch {
+    // ignore
+  }
+}
 
 function shortId(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}${Date.now().toString(16).slice(-6)}`;
@@ -271,12 +281,32 @@ function toolCallSignature(entry) {
 function mergeToolCalls(existing, incoming) {
   const base = Array.isArray(existing) ? existing : [];
   const next = Array.isArray(incoming) ? incoming : [];
-  const merged = [];
+  const merged = base.map((entry) => ({ ...entry }));
   const seen = new Set();
+  let changed = false;
 
-  const push = (entry) => {
+  const push = (entry, allowMerge = true) => {
     if (!entry || !entry.name) {
       return;
+    }
+    if (allowMerge) {
+      const sameNameIndex = merged.findIndex((existingEntry) =>
+        existingEntry?.name === entry.name
+        && String(existingEntry?.arguments ?? "").trim() !== String(entry.arguments ?? "").trim()
+        && String(existingEntry?.arguments ?? "").trim() === "");
+      if (sameNameIndex >= 0) {
+        merged[sameNameIndex] = {
+          ...merged[sameNameIndex],
+          ...entry,
+          arguments: entry.arguments,
+        };
+        changed = true;
+        const signature = toolCallSignature(merged[sameNameIndex]);
+        if (signature) {
+          seen.add(signature);
+        }
+        return;
+      }
     }
     const signature = toolCallSignature(entry);
     if (!signature || seen.has(signature)) {
@@ -284,20 +314,48 @@ function mergeToolCalls(existing, incoming) {
     }
     seen.add(signature);
     merged.push(entry);
+    changed = true;
   };
 
   for (const entry of base) {
-    push(entry);
+    const signature = toolCallSignature(entry);
+    if (signature && !seen.has(signature)) {
+      seen.add(signature);
+    }
   }
   for (const entry of next) {
     push(entry);
   }
-  const changed = merged.length !== base.length;
   return { merged, changed };
 }
 
 function buildMergedStreamText(modelText, toolCalls) {
   return appendToolCallsFence(modelText || "", toolCalls || []);
+}
+
+function normalizeRealtimeToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    return [];
+  }
+  return toolCalls
+    .map((entry) => {
+      if (!entry || !entry.name) {
+        return null;
+      }
+      return {
+        id: String(entry.id ?? "").trim(),
+        name: String(entry.name ?? "").trim(),
+        arguments: normalizeToolCallArguments(
+          entry.arguments ?? entry.title ?? entry.summary ?? entry.output ?? ""
+        ),
+        status: String(entry.status ?? "").trim(),
+        phase: String(entry.phase ?? "").trim(),
+        title: String(entry.title ?? "").trim(),
+        summary: String(entry.summary ?? "").trim(),
+        output: normalizeToolCallArguments(entry.output ?? ""),
+      };
+    })
+    .filter((entry) => entry && entry.name);
 }
 
 function computePatch(previous, current) {
@@ -707,7 +765,7 @@ export function resolveOpenclawSessionKey(config, conversationId) {
   return `${namespace}:conv:${normalizedConversationId}`;
 }
 
-async function streamOpenclaw(config, requestId, conversationId, prompt, attachments, timeoutMs, onDelta, onProbe) {
+async function streamOpenclaw(config, requestId, conversationId, prompt, attachments, timeoutMs, onDelta, onToolCalls, onProbe, invokeLogger, invokeBaseFields) {
   const GatewayClient = await loadGatewayClientClass(config);
   const sessionKey = resolveOpenclawSessionKey(config, conversationId);
   const runId = requestId;
@@ -730,6 +788,17 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
     let acceptedRunId = "";
     let lastDeltaAtMs = 0;
     let idleTimer = null;
+
+    const emitToolCalls = () => {
+      if (typeof onToolCalls !== "function") {
+        return;
+      }
+      try {
+        onToolCalls(normalizeRealtimeToolCalls(observedToolCalls));
+      } catch {
+        // Tool call side-channel must not break the main stream.
+      }
+    };
 
     const bumpIdleTimer = () => {
       if (settled) {
@@ -796,12 +865,104 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
         }
       },
       onEvent: (evt) => {
-        if (settled || evt?.event !== "chat") {
+        // Basic entry log - test without evt reference
+        diagLog({ event: "onEvent_entry_test", msg: "called" });
+
+        // Basic entry log
+        diagLog({
+          event: "onEvent_entry",
+          evt_type: evt?.event,
+          has_payload: !!evt?.payload,
+        });
+
+        // Log ALL event types for debugging (temporary)
+        if (evt?.event) {
+          diagLog({
+            event: "openclaw_raw_event",
+            request_id: requestId,
+            evt_type: evt?.event,
+            payload_keys: evt?.payload ? Object.keys(evt.payload).slice(0, 15) : [],
+          });
+        }
+
+        // Check all stream types for potential tool information
+        if (evt?.event === "agent" && evt?.payload) {
+          const streamType = evt.payload.stream;
+          const data = evt.payload.data;
+          // Log full data structure for non-assistant streams
+          if (streamType !== "assistant" && streamType !== "lifecycle") {
+            diagLog({
+              event: "agent_unusual_stream",
+              request_id: requestId,
+              stream: streamType,
+              data_full: JSON.stringify(data).slice(0, 1000),
+            });
+          }
+          // Check if data has tool-related fields
+          if (data && typeof data === "object") {
+            const dataKeys = Object.keys(data);
+            const toolRelatedKeys = dataKeys.filter(k =>
+              k.toLowerCase().includes("tool") ||
+              k.toLowerCase().includes("function") ||
+              k.toLowerCase().includes("mcp") ||
+              k.toLowerCase().includes("call"));
+            if (toolRelatedKeys.length > 0) {
+              diagLog({
+                event: "agent_tool_data",
+                request_id: requestId,
+                stream: streamType,
+                tool_keys: toolRelatedKeys,
+                tool_data: JSON.stringify(data).slice(0, 500),
+              });
+            }
+          }
+        }
+
+        // Also check for tool-related events
+        const evtType = String(evt?.event ?? "").toLowerCase();
+        if (evtType.includes("tool") || evtType.includes("function")) {
+          diagLog({
+            event: "tool_related_event",
+            request_id: requestId,
+            evt_type: evt?.event,
+            payload: JSON.stringify(evt?.payload ?? {}).slice(0, 500),
+          });
+        }
+
+        // Handle both "chat" and "agent" event types
+        if (settled || (evt?.event !== "chat" && evt?.event !== "agent")) {
           return;
         }
         bumpIdleTimer();
+
+        // Log full agent event structure for debugging
+        if (evt?.event === "agent") {
+          const agentPayload = evt?.payload ?? {};
+          diagLog({
+            event: "agent_event_detail",
+            request_id: requestId,
+            stream: agentPayload.stream,
+            data_type: typeof agentPayload.data,
+            data_preview: typeof agentPayload.data === "string"
+              ? agentPayload.data.slice(0, 200)
+              : JSON.stringify(agentPayload.data).slice(0, 200),
+          });
+        }
+
         const payload = evt?.payload ?? {};
         const payloadRunId = String(payload?.runId ?? "");
+
+        // Debug: log runId check
+        if (evt?.event === "agent") {
+          diagLog({
+            event: "runid_check",
+            request_id: requestId,
+            payload_run_id: payloadRunId,
+            accepted_run_id: acceptedRunId,
+            will_skip: acceptedRunId && payloadRunId && payloadRunId !== acceptedRunId,
+          });
+        }
+
         if (acceptedRunId) {
           if (payloadRunId && payloadRunId !== acceptedRunId) {
             return;
@@ -814,12 +975,256 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
         if (payloadRunId && payloadRunId !== acceptedRunId) {
           return;
         }
+
+        // Handle "agent" event type (new OpenClaw format)
+        // agent events have: runId, stream, data, sessionKey, seq, ts
+        // chat events have: runId, sessionKey, seq, state (and optionally message)
+        const isAgentEvent = evt?.event === "agent";
+        const isChatEvent = evt?.event === "chat";
+
+        if (isAgentEvent) {
+          // Agent event: extract text from payload.data
+          const agentData = payload?.data;
+          const agentStream = payload?.stream;
+          const agentSeq = payload?.seq;
+
+          // Debug: log agent stream type
+          diagLog({
+            event: "agent_stream_check",
+            request_id: requestId,
+            stream: agentStream,
+            data_type: typeof agentData,
+            data_is_object: agentData && typeof agentData === "object",
+            condition_met: agentStream === "item" && agentData && typeof agentData === "object",
+          });
+
+          // Handle tool/command streams - extract tool call information
+          if (agentStream === "item" && agentData && typeof agentData === "object") {
+            const kind = agentData.kind;
+            const phase = agentData.phase;
+            const toolCallId = agentData.toolCallId;
+            const toolName = agentData.name || "";
+            const title = agentData.title || "";
+            const status = agentData.status || "";
+            const toolArguments = normalizeToolCallArguments(
+              agentData.arguments ?? agentData.input ?? agentData.command ?? agentData.params ?? title
+            );
+
+            // Debug: log what we extracted
+            diagLog({
+              event: "item_stream_debug",
+              request_id: requestId,
+              kind: kind,
+              phase: phase,
+              toolCallId: toolCallId,
+              toolName: toolName,
+            });
+
+            // Only process tool/command kinds
+            if ((kind === "tool" || kind === "command") && toolCallId) {
+              let toolCallsChanged = false;
+
+              if (phase === "start") {
+                // Tool call started - add to observed tool calls
+                const newToolCall = {
+                  id: toolCallId,
+                  name: toolName,
+                  arguments: toolArguments,
+                  title: title,
+                  status: status,
+                  phase: phase,
+                };
+                // Check if already exists
+                const existingIndex = observedToolCalls.findIndex(tc => tc.id === toolCallId);
+                if (existingIndex < 0) {
+                  observedToolCalls.push(newToolCall);
+                  toolCallsChanged = true;
+                  diagLog({
+                    event: "tool_call_started",
+                    request_id: requestId,
+                    tool_call_id: toolCallId,
+                    tool_name: toolName,
+                    title: title,
+                  });
+                }
+              } else if (phase === "end") {
+                // Tool call completed - update status
+                const existingIndex = observedToolCalls.findIndex(tc => tc.id === toolCallId);
+                if (existingIndex >= 0) {
+                  observedToolCalls[existingIndex].status = status;
+                  observedToolCalls[existingIndex].phase = phase;
+                  if (toolArguments) {
+                    observedToolCalls[existingIndex].arguments = toolArguments;
+                  }
+                  if (agentData.summary) {
+                    observedToolCalls[existingIndex].summary = agentData.summary;
+                  }
+                  toolCallsChanged = true;
+                }
+                diagLog({
+                  event: "tool_call_ended",
+                  request_id: requestId,
+                  tool_call_id: toolCallId,
+                  tool_name: toolName,
+                  status: status,
+                });
+              }
+
+              // Send updated tool calls immediately when they change
+              if (toolCallsChanged) {
+                emitToolCalls();
+                const mergedText = buildMergedStreamText(currentModelText, observedToolCalls.map(tc => ({
+                  name: tc.name,
+                  arguments: tc.title || "",
+                })));
+                const patch = computePatch(currentMergedText, mergedText);
+                if (patch.text) {
+                  currentMergedText = mergedText;
+                  lastDeltaAtMs = Date.now();
+                  onDelta({
+                    text: patch.text,
+                    replace: patch.replace,
+                    newBubble: false,
+                  });
+                }
+              }
+            }
+            return; // Don't send item events as text
+          }
+
+          // Handle command_output stream - contains tool output
+          if (agentStream === "command_output" && agentData && typeof agentData === "object") {
+            // Update tool call with output if available
+            const toolCallId = agentData.toolCallId;
+            if (toolCallId) {
+              const existingIndex = observedToolCalls.findIndex(tc => tc.id === toolCallId);
+              if (existingIndex >= 0 && agentData.output) {
+                observedToolCalls[existingIndex].output = agentData.output;
+                emitToolCalls();
+              }
+            }
+            return; // Don't send command_output as text
+          }
+
+          // Handle assistant stream - actual text content
+          if (agentStream === "assistant" && agentData && typeof agentData === "object") {
+            const text = agentData.text || "";
+            const delta = agentData.delta || text;
+
+            if (delta) {
+              // Update model text first
+              currentModelText = text;
+
+              // Build merged text with tool calls appended
+              const mergedText = buildMergedStreamText(currentModelText, observedToolCalls.map(tc => ({
+                name: tc.name,
+                arguments: tc.title || "",
+              })));
+
+              // Compute what needs to be sent (patch from previous merged text)
+              const patch = computePatch(currentMergedText, mergedText);
+
+              currentMergedText = mergedText;
+              lastDeltaAtMs = Date.now();
+
+              // Send the patch which includes tool calls
+              if (patch.text) {
+                onDelta({
+                  text: patch.text,
+                  replace: patch.replace,
+                  newBubble: false,
+                });
+              }
+            }
+            return;
+          }
+
+          // Log other agent streams for debugging
+          diagLog({
+            event: "agent_event_processed",
+            request_id: requestId,
+            stream: agentStream,
+            seq: agentSeq,
+            data_type: typeof agentData,
+            data_preview: typeof agentData === "string"
+              ? agentData.slice(0, 100)
+              : JSON.stringify(agentData).slice(0, 100),
+          });
+
+          // Fallback: handle string data
+          if (typeof agentData === "string" && agentData) {
+            onDelta({
+              text: agentData,
+              replace: false,
+              newBubble: false,
+            });
+          }
+          return;
+        }
+
+        // Original chat event handling
         const state = String(payload?.state ?? "");
         const message = payload?.message;
+
+        // Enhanced tool call diagnostics: log raw message structure when tool calls might be present
+        if (state === "delta" || state === "final") {
+          const messageContent = Array.isArray(message?.content) ? message.content : [];
+          const hasToolLikeContent = messageContent.some((item) => {
+            if (!item || typeof item !== "object") {
+              return false;
+            }
+            const itemType = String(item?.type ?? item?.kind ?? "").toLowerCase();
+            return itemType.includes("tool") || itemType.includes("function") || itemType.includes("use");
+          });
+          const payloadKeys = Object.keys(payload);
+          const hasToolPayload = payloadKeys.some((key) =>
+            key.toLowerCase().includes("tool") || key.toLowerCase().includes("function"));
+          if (hasToolLikeContent || hasToolPayload) {
+            emitInvokeLog(invokeLogger, "info", "invoke_tool_call_raw", {
+              ...invokeBaseFields,
+              state,
+              message_content_types: messageContent.map((item) => item?.type ?? item?.kind ?? "unknown"),
+              payload_keys: payloadKeys.slice(0, 15),
+              has_tool_use: hasToolLikeContent,
+              has_tool_payload: hasToolPayload,
+              raw_message_sample: JSON.stringify(message).slice(0, 500),
+            });
+          }
+        }
+
         const discoveredToolCalls = extractMessageToolCalls(message, payload);
         const mergedToolResult = mergeToolCalls(observedToolCalls, discoveredToolCalls);
         if (mergedToolResult.changed) {
           observedToolCalls = mergedToolResult.merged;
+          emitToolCalls();
+          // Log when new tool calls are discovered
+          emitInvokeLog(invokeLogger, "info", "invoke_tool_call_discovered", {
+            ...invokeBaseFields,
+            state,
+            new_tool_calls: discoveredToolCalls.length,
+            total_tool_calls: observedToolCalls.length,
+            tool_call_names: discoveredToolCalls.map((tc) => tc?.name ?? "unknown"),
+          });
+        }
+        // Diagnostic: log raw message structure for tool call debugging
+        if (state === "delta" || state === "final") {
+          const messageContent = Array.isArray(message?.content) ? message.content : [];
+          if (messageContent.length > 0) {
+            diagLog({
+              event: "message_content",
+              request_id: requestId,
+              state,
+              content_types: messageContent.map((item) => item?.type ?? item?.kind ?? "unknown"),
+              content_preview: messageContent.slice(0, 2).map((item) => {
+                if (item?.type === "text" || item?.kind === "text") {
+                  return { type: "text", preview: String(item?.text ?? "").slice(0, 100) };
+                }
+                return { type: item?.type ?? item?.kind ?? "unknown", keys: Object.keys(item).slice(0, 10) };
+              }),
+              payload_keys: Object.keys(payload).slice(0, 15),
+              tool_calls_found: discoveredToolCalls.length,
+            });
+          }
         }
         if (typeof onProbe === "function") {
           try {
@@ -971,24 +1376,41 @@ async function runInvokeTask(task) {
       attachments,
       effectiveTimeoutMs,
       (chunk) => {
-      seq += 1;
-      wsSend({
-        protocol_version: "channel.v0",
-        msg_id: shortId(),
-        event: "invoke.chunk",
-        ts: new Date().toISOString(),
-        trace_id: traceId,
-        payload: {
-          request_id: requestId,
-          turn_id: turnId,
-          assistant_message_id: assistantMessageId,
-          seq,
-          delta: chunk.text,
-          replace: chunk.replace === true,
-          new_bubble: chunk.newBubble === true,
-          is_final: false,
-        },
-      });
+        seq += 1;
+        wsSend({
+          protocol_version: "channel.v0",
+          msg_id: shortId(),
+          event: "invoke.chunk",
+          ts: new Date().toISOString(),
+          trace_id: traceId,
+          payload: {
+            request_id: requestId,
+            turn_id: turnId,
+            assistant_message_id: assistantMessageId,
+            seq,
+            delta: chunk.text,
+            replace: chunk.replace === true,
+            new_bubble: chunk.newBubble === true,
+            is_final: false,
+          },
+        });
+      },
+      (toolCalls) => {
+        seq += 1;
+        wsSend({
+          protocol_version: "channel.v0",
+          msg_id: shortId(),
+          event: "invoke.tool_call",
+          ts: new Date().toISOString(),
+          trace_id: traceId,
+          payload: {
+            request_id: requestId,
+            turn_id: turnId,
+            assistant_message_id: assistantMessageId,
+            seq,
+            tool_calls: Array.isArray(toolCalls) ? toolCalls : [],
+          },
+        });
       },
       (probe) => {
         if (!probe) {
@@ -1019,6 +1441,9 @@ async function runInvokeTask(task) {
           });
         }
       }
+      ,
+      logger,
+      baseFields
     );
 
     wsSend({

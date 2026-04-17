@@ -99,6 +99,7 @@ export function createGatewayClient({ api, config }) {
     stopHeartbeat();
     sessionId = "";
     lastHeartbeatAckAt = 0;
+    connectStartedAt = 0;
     connecting = false;
   };
 
@@ -226,6 +227,8 @@ export function createGatewayClient({ api, config }) {
     switch (event.event) {
       case "register.ok": {
         sessionId = String(event?.payload?.session_id ?? "");
+        connecting = false;
+        connectStartedAt = 0;
         const serverHeartbeat = Number(event?.payload?.heartbeat_interval_sec ?? config.heartbeatIntervalSec);
         if (Number.isFinite(serverHeartbeat) && serverHeartbeat > 0) {
           config.heartbeatIntervalSec = serverHeartbeat;
@@ -289,25 +292,38 @@ export function createGatewayClient({ api, config }) {
       connectStartedAt = Date.now();
       const WebSocketCtor = await getWebSocketCtor();
       emitLog("info", "connect_start", { ws_url: config.wsUrl });
-      ws = new WebSocketCtor(config.wsUrl);
+      const socket = new WebSocketCtor(config.wsUrl);
+      ws = socket;
       startWatchdog();
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (ws !== socket) {
+          return;
+        }
         sendRegister();
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
+        if (ws !== socket) {
+          return;
+        }
         void onMessage(event);
       };
 
-      ws.onerror = (event) => {
+      socket.onerror = (event) => {
+        if (ws !== socket) {
+          return;
+        }
         lastError = String(event?.message ?? "socket error");
         emitLog("warn", "socket_error", {
           reason: String(event?.message ?? ""),
         });
       };
 
-      ws.onclose = () => {
+      socket.onclose = () => {
+        if (ws !== socket) {
+          return;
+        }
         stopWatchdog();
         resetSocketState();
         emitLog("info", "socket_closed", {

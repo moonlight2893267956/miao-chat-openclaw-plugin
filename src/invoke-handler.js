@@ -26,6 +26,12 @@ let activeInvokeCount = 0;
 const activeInvokeIds = new Set();
 const pendingInvokeQueue = [];
 const MAX_PENDING_QUEUE_SIZE = 100;
+const MAX_GATEWAY_CHUNK_CHARS = 1200;
+const MAX_TOOL_CALLS_PER_EVENT = 8;
+const MAX_TOOL_CALL_ARGS_CHARS = 1200;
+const MAX_TOOL_CALL_OUTPUT_CHARS = 1200;
+const MAX_TOOL_CALL_TITLE_CHARS = 300;
+const MAX_TOOL_CALL_SUMMARY_CHARS = 400;
 
 function resolveOpenclawInstallRoot(config) {
   const cliCandidate = String(process.env.OPENCLAW_CLI_PATH || "openclaw").trim();
@@ -61,6 +67,7 @@ function hasGatewayClientShape(value) {
 function listGatewayClientBundles(distDir) {
   const files = fs.readdirSync(distDir);
   const patterns = [
+    /^client-.*\.js$/,
     /^method-scopes-.*\.js$/,
     /^reply-.*\.js$/,
     /^pi-embedded-.*\.js$/,
@@ -137,6 +144,47 @@ export function extractMessageText(message) {
   return lines.join("\n");
 }
 
+function getMessageContentItems(message) {
+  return Array.isArray(message?.content) ? message.content : [];
+}
+
+function isToolLikeContentItem(item) {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  const type = String(item?.type ?? item?.kind ?? "").toLowerCase();
+  return type.includes("tool")
+    || type.includes("function")
+    || type.includes("command");
+}
+
+function isThinkingContentItem(item) {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  const type = String(item?.type ?? item?.kind ?? "").toLowerCase();
+  return type === "thinking" || type === "reasoning";
+}
+
+export function isIntermediateToolUseFinal(payload, message, text) {
+  const stopReason = String(
+    message?.stopReason
+      ?? message?.stop_reason
+      ?? payload?.stopReason
+      ?? payload?.stop_reason
+      ?? ""
+  ).toLowerCase();
+  const content = getMessageContentItems(message);
+  const hasText = String(text ?? "").trim().length > 0;
+  const hasToolLikeContent = content.some(isToolLikeContentItem);
+  const hasOnlyNonUserVisibleContent = content.length > 0
+    && content.every((item) => isToolLikeContentItem(item) || isThinkingContentItem(item));
+  if (stopReason.includes("tool") && hasToolLikeContent) {
+    return true;
+  }
+  return !hasText && hasToolLikeContent && hasOnlyNonUserVisibleContent;
+}
+
 function normalizeToolCallName(raw) {
   const value = String(raw ?? "").trim();
   return value || "";
@@ -154,6 +202,32 @@ function normalizeToolCallArguments(raw) {
   } catch {
     return String(raw);
   }
+}
+
+function clampText(value, maxChars) {
+  const text = String(value ?? "");
+  if (!Number.isFinite(maxChars) || maxChars <= 0) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return text.slice(0, maxChars) + " …[truncated]";
+}
+
+function splitTextChunks(text, maxChars) {
+  const source = String(text ?? "");
+  if (!source) {
+    return [];
+  }
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || source.length <= maxChars) {
+    return [source];
+  }
+  const parts = [];
+  for (let index = 0; index < source.length; index += maxChars) {
+    parts.push(source.slice(index, index + maxChars));
+  }
+  return parts;
 }
 
 function toToolCallEntry(item) {
@@ -330,7 +404,7 @@ function mergeToolCalls(existing, incoming) {
 }
 
 function buildMergedStreamText(modelText, toolCalls) {
-  return appendToolCallsFence(modelText || "", toolCalls || []);
+  return modelText || "";
 }
 
 function normalizeRealtimeToolCalls(toolCalls) {
@@ -345,17 +419,18 @@ function normalizeRealtimeToolCalls(toolCalls) {
       return {
         id: String(entry.id ?? "").trim(),
         name: String(entry.name ?? "").trim(),
-        arguments: normalizeToolCallArguments(
+        arguments: clampText(normalizeToolCallArguments(
           entry.arguments ?? entry.title ?? entry.summary ?? entry.output ?? ""
-        ),
+        ), MAX_TOOL_CALL_ARGS_CHARS),
         status: String(entry.status ?? "").trim(),
         phase: String(entry.phase ?? "").trim(),
-        title: String(entry.title ?? "").trim(),
-        summary: String(entry.summary ?? "").trim(),
-        output: normalizeToolCallArguments(entry.output ?? ""),
+        title: clampText(String(entry.title ?? "").trim(), MAX_TOOL_CALL_TITLE_CHARS),
+        summary: clampText(String(entry.summary ?? "").trim(), MAX_TOOL_CALL_SUMMARY_CHARS),
+        output: clampText(normalizeToolCallArguments(entry.output ?? ""), MAX_TOOL_CALL_OUTPUT_CHARS),
       };
     })
-    .filter((entry) => entry && entry.name);
+    .filter((entry) => entry && entry.name)
+    .slice(0, MAX_TOOL_CALLS_PER_EVENT);
 }
 
 function computePatch(previous, current) {
@@ -771,8 +846,8 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
   const runId = requestId;
   const connectTimeoutMs = Math.min(15000, Math.max(3000, Math.floor(timeoutMs / 2)));
   const idleTimeoutMs = Number.isFinite(config?.invokeIdleTimeoutMs)
-    ? Math.min(180000, Math.max(15000, Math.round(config.invokeIdleTimeoutMs)))
-    : 180000;
+    ? Math.min(600000, Math.max(15000, Math.round(config.invokeIdleTimeoutMs)))
+    : Math.min(600000, Math.max(15000, timeoutMs));
   const socketAuth = buildSocketAuth(config);
 
   const openclawPayload = await buildOpenclawPayload(prompt, attachments, timeoutMs);
@@ -785,7 +860,9 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
     let currentModelText = "";
     let currentMergedText = "";
     let observedToolCalls = [];
-    let acceptedRunId = "";
+    // Default to the current request run id to avoid cross-run stream pollution
+    // when the same OpenClaw session has concurrent/background runs.
+    let acceptedRunId = String(runId || "");
     let lastDeltaAtMs = 0;
     let idleTimer = null;
 
@@ -963,17 +1040,15 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
           });
         }
 
-        if (acceptedRunId) {
-          if (payloadRunId && payloadRunId !== acceptedRunId) {
+        if (payloadRunId) {
+          if (acceptedRunId && payloadRunId !== acceptedRunId) {
             return;
           }
-        } else if (payloadRunId) {
-          acceptedRunId = payloadRunId;
-        } else {
-          acceptedRunId = runId;
-        }
-        if (payloadRunId && payloadRunId !== acceptedRunId) {
-          return;
+          if (!acceptedRunId) {
+            acceptedRunId = payloadRunId;
+          }
+        } else if (!acceptedRunId) {
+          acceptedRunId = String(runId || "");
         }
 
         // Handle "agent" event type (new OpenClaw format)
@@ -1139,6 +1214,17 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
             return;
           }
 
+          // Some OpenClaw runs finish only with agent lifecycle end (without chat.final).
+          // Treat lifecycle end as graceful completion to avoid hanging the caller.
+          if (agentStream === "lifecycle" && agentData && typeof agentData === "object") {
+            const phase = String(agentData.phase ?? "").toLowerCase();
+            if (phase === "end") {
+              usage = normalizeUsage(payload?.usage ?? agentData?.usage);
+              settle();
+              return;
+            }
+          }
+
           // Log other agent streams for debugging
           diagLog({
             event: "agent_event_processed",
@@ -1251,6 +1337,10 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
         if (state === "delta" || state === "final") {
           const text = extractMessageText(message)
             || String(payload?.text ?? payload?.content ?? "");
+          const intermediateToolUseFinal = state === "final" && (
+            isIntermediateToolUseFinal(payload, message, text)
+              || (!text.trim() && !message && observedToolCalls.length > 0)
+          );
           if (text) {
             currentModelText = text;
           }
@@ -1274,6 +1364,16 @@ async function streamOpenclaw(config, requestId, conversationId, prompt, attachm
           } else if (mergedText) {
             currentMergedText = mergedText;
             lastDeltaAtMs = Date.now();
+          }
+          if (state === "final" && intermediateToolUseFinal) {
+            diagLog({
+              event: "skip_intermediate_tool_use_final",
+              request_id: requestId,
+              stop_reason: message?.stopReason ?? message?.stop_reason ?? payload?.stopReason ?? payload?.stop_reason ?? "",
+              content_types: getMessageContentItems(message).map((item) => item?.type ?? item?.kind ?? "unknown"),
+              observed_tool_calls: observedToolCalls.length,
+            });
+            return;
           }
           if (state === "final") {
             usage = normalizeUsage(payload?.usage);
@@ -1376,26 +1476,35 @@ async function runInvokeTask(task) {
       attachments,
       effectiveTimeoutMs,
       (chunk) => {
-        seq += 1;
-        wsSend({
-          protocol_version: "channel.v0",
-          msg_id: shortId(),
-          event: "invoke.chunk",
-          ts: new Date().toISOString(),
-          trace_id: traceId,
-          payload: {
-            request_id: requestId,
-            turn_id: turnId,
-            assistant_message_id: assistantMessageId,
-            seq,
-            delta: chunk.text,
-            replace: chunk.replace === true,
-            new_bubble: chunk.newBubble === true,
-            is_final: false,
-          },
+        const chunkParts = splitTextChunks(chunk.text, MAX_GATEWAY_CHUNK_CHARS);
+        if (chunkParts.length === 0) {
+          return;
+        }
+        const replaceFirst = chunk.replace === true;
+        const bubbleFirst = chunk.newBubble === true;
+        chunkParts.forEach((part, index) => {
+          seq += 1;
+          wsSend({
+            protocol_version: "channel.v0",
+            msg_id: shortId(),
+            event: "invoke.chunk",
+            ts: new Date().toISOString(),
+            trace_id: traceId,
+            payload: {
+              request_id: requestId,
+              turn_id: turnId,
+              assistant_message_id: assistantMessageId,
+              seq,
+              delta: part,
+              replace: index === 0 ? replaceFirst : false,
+              new_bubble: index === 0 ? bubbleFirst : false,
+              is_final: false,
+            },
+          });
         });
       },
       (toolCalls) => {
+        const safeToolCalls = normalizeRealtimeToolCalls(Array.isArray(toolCalls) ? toolCalls : []);
         seq += 1;
         wsSend({
           protocol_version: "channel.v0",
@@ -1408,7 +1517,7 @@ async function runInvokeTask(task) {
             turn_id: turnId,
             assistant_message_id: assistantMessageId,
             seq,
-            tool_calls: Array.isArray(toolCalls) ? toolCalls : [],
+            tool_calls: safeToolCalls,
           },
         });
       },
